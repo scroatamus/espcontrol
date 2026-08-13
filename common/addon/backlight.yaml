@@ -1083,6 +1083,16 @@ script:
             - script.execute: display_mode_clear_cover_art
             - script.wait: display_mode_clear_cover_art
       - script.execute: screensaver_idle_check
+      - if:
+          condition:
+            lambda: |-
+              return id(screensaver_previous_page) != nullptr &&
+                     id(screensaver_previous_page) != id(screen_off_page)->obj;
+          then:
+            - lambda: |-
+                lv_scr_load_anim(
+                    id(screensaver_previous_page),
+                    LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
       - script.execute: home_screen_idle_check
       - if:
           condition:
