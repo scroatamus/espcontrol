@@ -38,6 +38,10 @@ globals:
   - id: screensaver_wake_restore_pending
     type: bool
     initial_value: 'false'
+  - id: screensaver_previous_page
+    type: lv_obj_t *
+    restore_value: no
+    initial_value: 'nullptr'    
   - id: screensaver_sensor_sleep_pending
     type: bool
     initial_value: 'false'
@@ -859,6 +863,10 @@ script:
           }
       - script.execute: hide_clock_view
       - lvgl.widget.hide: dim_screensaver_touch_guard
+      - lambda: |-
+          if (lv_scr_act() != id(screen_off_page)->obj) {
+            id(screensaver_previous_page) = lv_scr_act();
+          }
       - lvgl.page.show: screen_off_page
       - script.execute: clock_bar_hide
       - delay: 50ms
