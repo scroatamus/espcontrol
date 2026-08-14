@@ -1093,6 +1093,7 @@ script:
                 lv_scr_load_anim(
                     id(screensaver_previous_page),
                     LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
+                id(screensaver_previous_page) = nullptr;                    
       - script.execute: home_screen_idle_check
       - if:
           condition:
