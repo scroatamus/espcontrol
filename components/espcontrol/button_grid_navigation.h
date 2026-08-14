@@ -79,11 +79,21 @@ inline void navigation_clear_home_targets() {
 
 inline void navigation_clear_subpages() {
   lv_obj_t *active = lv_scr_act();
+
   for (auto &entry : navigation_subpages()) {
-    if (entry.screen != nullptr && entry.screen != active) {
+    if (entry.screen == nullptr) continue;
+
+    // Do not leave screensaver_previous_page pointing at a page
+    // that is about to be deleted.
+    if (id(screensaver_previous_page) == entry.screen) {
+      id(screensaver_previous_page) = nullptr;
+    }
+
+    if (entry.screen != active) {
       lv_obj_del(entry.screen);
     }
   }
+
   navigation_subpages().clear();
   clock_bar_clear_button_grid_pages();
 }
