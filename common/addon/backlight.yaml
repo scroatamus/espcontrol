@@ -1083,7 +1083,7 @@ script:
             - script.execute: display_mode_clear_cover_art
             - script.wait: display_mode_clear_cover_art
       - script.execute: screensaver_idle_check
-       - if:
+      - if:
           condition:
             lambda: |-
               return id(screensaver_previous_page) != nullptr &&
