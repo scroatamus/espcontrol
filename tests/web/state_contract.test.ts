@@ -92,6 +92,7 @@ export function runStateContractTests(): void {
   const canonicals: Readonly<Record<keyof typeof SSE_ALIAS_GROUPS, string>> = {
     clockBar: "switch-screen__clock_bar",
     clockBarTime: "switch-screen__clock_bar_time",
+    clockBarNightMode: "switch-screen__clock_bar_night_mode_icon",
     clockBarTemperatureEntities: "text-clock_bar_temperature_entities",
     networkStatus: "switch-screen__network_status_icon",
     batteryStatus: "switch-screen__battery_status",
@@ -107,8 +108,11 @@ export function runStateContractTests(): void {
     screensaverTimeout: "number-screensaver_timeout",
     clockScreensaver: "switch-screen_saver__clock",
     mediaPlayerSleepPrevention: "switch-screen_saver__media_player_sleep_prevention",
+    coverArtPlaybackControl: "switch-screen_saver__cover_art_playback_control",
     mediaPlayerSleepPreventionEntity: "text-media_player_sleep_prevention_entity",
     coverArt: "switch-screen_saver__cover_art",
+    clockOverlay: "switch-screen_saver__clock_overlay",
+    metadataOverlay: "switch-screen_saver__metadata_overlay",
     coverArtEntity: "text-screen_saver__cover_art_entity",
     coverArtSecondaryEntity: "text-screen_saver__external_source_media_entity",
     coverArtConditions: "text-screen_saver__cover_art_conditions",
@@ -117,6 +121,8 @@ export function runStateContractTests(): void {
     coverArtHideExternalInput: "switch-screen_saver__hide_cover_art_on_external_input",
     homeAssistantArtworkProtocol: "select-home_assistant_artwork_protocol",
     homeAssistantArtworkPort: "number-home_assistant_artwork_port",
+    homeAssistantArtworkEndpointMode: "select-home_assistant_artwork_endpoint_mode",
+    homeAssistantArtworkEndpointStatus: "text_sensor-home_assistant_artwork_endpoint_status",
     scheduleTrigger: "text-screen__schedule_trigger",
     scheduleSensorActivation: "select-screen__schedule_sensor_activation",
     scheduleWakeTimeout: "number-screen__schedule_wake_timeout",
@@ -140,6 +146,17 @@ export function runStateContractTests(): void {
   handlers["switch-clock_bar_enabled"]?.("ON", {}, "switch-clock_bar_enabled");
   handlers["text-ntp_server_1"]?.("time.example", {}, "text-ntp_server_1");
   equal(calls.join(","), "clockBar,ntpServer1", "legacy aliases dispatch to their canonical handlers");
+
+  for (const [id, state, group] of [
+    ["select/Home Assistant Artwork Connection", "Automatic", "homeAssistantArtworkEndpointMode"],
+    ["text_sensor/Home Assistant Artwork Endpoint", "Automatic — http://172.16.20.40:8123", "homeAssistantArtworkEndpointStatus"],
+  ] as const) {
+    const event = { id, state };
+    const key = entityStateKeys(event).find(key => handlers[key]);
+    assert(key, "artwork display names resolve to a handler");
+    handlers[key]!(state, event, key);
+    equal(calls.at(-1), group, "artwork events dispatch to the canonical handler");
+  }
 
   const clockState = createInitialState(deviceConfig());
   applyClockBarStateValue(clockState, "ON", { id: "switch-screen__clock_bar", value: true }, "switch-screen__clock_bar");

@@ -1,6 +1,38 @@
 import { state } from "../state/app_instance";
-import { liveGlobal, staticGlobal, type GlobalDescriptors } from "../runtime/globals";
-export function installConfigImageOptionsModule(): GlobalDescriptors {
+import {
+    configOptionEnabled,
+    configOptionValue,
+    setConfigOption,
+    setConfigOptionValue,
+} from "../model/config_primitives";
+import type { ApplicationLayoutState } from "./application_context";
+import type { ConfigMediaOptionsFeature } from "./config_media_options";
+import {
+    IMAGE_ICON_OPTION,
+    IMAGE_LABEL_OPTION,
+    IMAGE_MODAL_MODE_OPTION,
+    cardContractOptionDefaultValue,
+    cardContractOptionSpec,
+} from "./config_option_core";
+export interface ConfigImageOptionsDependencies {
+    readonly layout: ApplicationLayoutState;
+    readonly mediaOptions: Pick<ConfigMediaOptionsFeature, "mediaEditorMode">;
+    readonly showBanner: (message: string, kind: "error") => void;
+}
+
+export function createConfigImageOptionsFeature(dependencies: ConfigImageOptionsDependencies) {
+    const layout = dependencies.layout;
+    const mediaEditorMode = dependencies.mediaOptions.mediaEditorMode;
+    const IMAGE_SLOT_CAPACITY = Math.max(0, Number(layout.config.imageSlotCapacity) || 0);
+    let parseSubpage: ((value: string) => any) | undefined;
+    function connectSubpageParser(parser: (value: string) => any) {
+        parseSubpage = parser;
+    }
+    function parseSubpageConfig(value: string) {
+        if (!parseSubpage)
+            throw new Error("Image options used before the subpage parser was connected");
+        return parseSubpage(value);
+    }
     // ── Image Card Options ─────────────────────────────────────────────
     function imageModalModeValues(this: any) {
         var spec: any = cardContractOptionSpec("image", IMAGE_MODAL_MODE_OPTION);
@@ -17,8 +49,15 @@ export function installConfigImageOptionsModule(): GlobalDescriptors {
     function imageSlotCapacityMessage(this: any) {
         if (IMAGE_SLOT_CAPACITY <= 0)
             return "Image cards are not available on this display.";
-        var disabled: any = CFG.disabledCardTypes || [];
-        if (disabled.indexOf("image") !== -1 && disabled.indexOf("media_cover_art") === -1) {
+        var disabled: readonly string[] = layout.config.disabledCardTypes || [];
+        var cameraAvailable: boolean = disabled.indexOf("image") < 0;
+        var mediaCoverArtAvailable: boolean = disabled.indexOf("media_cover_art") < 0;
+        if (cameraAvailable && !mediaCoverArtAvailable) {
+            return "This display supports up to " + IMAGE_SLOT_CAPACITY +
+                (IMAGE_SLOT_CAPACITY === 1 ? " Camera Card" : " Camera Cards") +
+                " across the main page and subpages.";
+        }
+        if (!cameraAvailable && mediaCoverArtAvailable) {
             return "This display supports up to " + IMAGE_SLOT_CAPACITY +
                 " Media Cover Art card" + (IMAGE_SLOT_CAPACITY === 1 ? "." : "s.");
         }
@@ -108,7 +147,7 @@ export function installConfigImageOptionsModule(): GlobalDescriptors {
         return imageCardCountWithCandidate() + extraCount <= IMAGE_SLOT_CAPACITY;
     }
     function showImageCardLimitBanner(this: any) {
-        showBanner(imageSlotCapacityMessage(), "error");
+        dependencies.showBanner(imageSlotCapacityMessage(), "error");
     }
     function imageModalMode(this: any, b?: any) {
         return normalizeImageModalMode(configOptionValue(b && b.options, IMAGE_MODAL_MODE_OPTION));
@@ -119,7 +158,10 @@ export function installConfigImageOptionsModule(): GlobalDescriptors {
     function imageIconEnabled(this: any, b?: any) {
         return !!(b && configOptionEnabled(b.options, IMAGE_ICON_OPTION));
     }
-    function normalizeImageOptions(this: any, options?: any) {
+    function validImageRefreshTrigger(value: string) {
+        return /^(binary_sensor|event)\.[a-z0-9_]+$/.test(value);
+    }
+    function normalizeImageOptions(this: any, options?: any, entity?: string, draft = false) {
         var out: any = "";
         if (configOptionEnabled(options, IMAGE_LABEL_OPTION)) {
             out = setConfigOption(out, IMAGE_LABEL_OPTION, true);
@@ -131,22 +173,33 @@ export function installConfigImageOptionsModule(): GlobalDescriptors {
         if (modalMode !== cardContractOptionDefaultValue("image", IMAGE_MODAL_MODE_OPTION, "fill")) {
             out = setConfigOptionValue(out, IMAGE_MODAL_MODE_OPTION, modalMode);
         }
+        if (!entity || entity.startsWith("camera.")) {
+            const mode = configOptionValue(options, "image_modal_refresh_mode");
+            const trigger = configOptionValue(options, "image_modal_refresh_trigger");
+            if (mode === "periodic") {
+                out = setConfigOptionValue(out, "image_modal_refresh_mode", mode);
+                const interval = configOptionValue(options, "image_modal_refresh_interval");
+                if (interval === "5" || interval === "30")
+                    out = setConfigOptionValue(out, "image_modal_refresh_interval", interval);
+            } else if (mode === "activity" && (draft || validImageRefreshTrigger(trigger))) {
+                out = setConfigOptionValue(out, "image_modal_refresh_mode", mode);
+                out = setConfigOptionValue(out, "image_modal_refresh_trigger", trigger);
+            }
+        }
         return out;
     }
     function setImageLabelEnabled(this: any, b?: any, enabled?: any) {
         if (!b)
             return "";
         b.options = setConfigOption(b.options, IMAGE_LABEL_OPTION, !!enabled);
-        if (!enabled)
-            b.label = "";
-        b.options = normalizeImageOptions(b.options);
+        b.options = normalizeImageOptions(b.options, b.entity, true);
         return b.options;
     }
     function setImageIconEnabled(this: any, b?: any, enabled?: any) {
         if (!b)
             return "";
         b.options = setConfigOption(b.options, IMAGE_ICON_OPTION, !!enabled);
-        b.options = normalizeImageOptions(b.options);
+        b.options = normalizeImageOptions(b.options, b.entity, true);
         return b.options;
     }
     function setImageModalMode(this: any, b?: any, value?: any) {
@@ -154,29 +207,33 @@ export function installConfigImageOptionsModule(): GlobalDescriptors {
             return "";
         var mode: any = normalizeImageModalMode(value);
         b.options = setConfigOptionValue(b.options, IMAGE_MODAL_MODE_OPTION, mode === "fill" ? "" : mode);
-        b.options = normalizeImageOptions(b.options);
+        b.options = normalizeImageOptions(b.options, b.entity, true);
         return b.options;
     }
     return {
-        "imageModalModeValues": staticGlobal(imageModalModeValues),
-        "normalizeImageModalMode": staticGlobal(normalizeImageModalMode),
-        "imageSlotCapacity": staticGlobal(imageSlotCapacity),
-        "imageSlotCapacityMessage": staticGlobal(imageSlotCapacityMessage),
-        "isImageCard": staticGlobal(isImageCard),
-        "activeGridSlots": staticGlobal(activeGridSlots),
-        "imageCardCountInButtons": staticGlobal(imageCardCountInButtons),
-        "imageCardCountInSubpage": staticGlobal(imageCardCountInSubpage),
-        "imageCardCountInClipboardEntry": staticGlobal(imageCardCountInClipboardEntry),
-        "imageCardCountInClipboardEntries": staticGlobal(imageCardCountInClipboardEntries),
-        "imageCardCountWithCandidate": staticGlobal(imageCardCountWithCandidate),
-        "canAddImageCards": staticGlobal(canAddImageCards),
-        "showImageCardLimitBanner": staticGlobal(showImageCardLimitBanner),
-        "imageModalMode": staticGlobal(imageModalMode),
-        "imageLabelEnabled": staticGlobal(imageLabelEnabled),
-        "imageIconEnabled": staticGlobal(imageIconEnabled),
-        "normalizeImageOptions": staticGlobal(normalizeImageOptions),
-        "setImageLabelEnabled": staticGlobal(setImageLabelEnabled),
-        "setImageIconEnabled": staticGlobal(setImageIconEnabled),
-        "setImageModalMode": staticGlobal(setImageModalMode),
+        connectSubpageParser,
+        imageModalModeValues,
+        normalizeImageModalMode,
+        imageSlotCapacity,
+        imageSlotCapacityMessage,
+        isImageCard,
+        activeGridSlots,
+        imageCardCountInButtons,
+        imageCardCountInSubpage,
+        imageCardCountInClipboardEntry,
+        imageCardCountInClipboardEntries,
+        imageCardCountWithCandidate,
+        canAddImageCards,
+        showImageCardLimitBanner,
+        imageModalMode,
+        imageLabelEnabled,
+        imageIconEnabled,
+        normalizeImageOptions,
+        validImageRefreshTrigger,
+        setImageLabelEnabled,
+        setImageIconEnabled,
+        setImageModalMode,
     };
 }
+
+export type ConfigImageOptionsFeature = ReturnType<typeof createConfigImageOptionsFeature>;

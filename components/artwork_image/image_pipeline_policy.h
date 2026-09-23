@@ -1,10 +1,292 @@
 #pragma once
 
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace esphome {
 namespace artwork_image {
+
+constexpr int IMAGE_PIPELINE_STANDARD_MODAL_MAX_TARGET_SIDE_PX = 800;
+// Match the native 480 px side of the ESP32-S3 panel while keeping the
+// existing memory checks responsible for deciding whether a decode can run.
+constexpr int IMAGE_PIPELINE_CONSTRAINED_MODAL_MAX_TARGET_SIDE_PX = 480;
+constexpr size_t IMAGE_PIPELINE_S3_COMPRESSED_TRANSFER_ALLOWANCE_BYTES =
+    128 * 1024;
+constexpr size_t IMAGE_PIPELINE_S3_PSRAM_HEADROOM_BYTES = 96 * 1024;
+
+constexpr int image_pipeline_modal_max_target_side(bool constrained) {
+  return constrained ? IMAGE_PIPELINE_CONSTRAINED_MODAL_MAX_TARGET_SIDE_PX
+                     : IMAGE_PIPELINE_STANDARD_MODAL_MAX_TARGET_SIDE_PX;
+}
+
+// Both cache reuse and timer scheduling use the same wrap-safe lifetime.
+// Readiness is explicit: a download completed at millis() == 0 is valid.
+constexpr uint32_t image_pipeline_modal_cache_remaining_ms(
+    bool ready, uint32_t cached_at_ms, uint32_t now_ms, uint32_t ttl_ms) {
+  if (!ready) return 0;
+  const uint32_t age = now_ms - cached_at_ms;
+  return age >= ttl_ms ? 0 : ttl_ms - age;
+}
+
+constexpr bool image_pipeline_should_retain_modal_cache(bool constrained) {
+  return !constrained;
+}
+
+// Standard displays keep their existing persistent modal cache. Constrained
+// displays may keep a bounded cache only while it is current and enough PSRAM
+// remains for another complete replacement pipeline. This makes cache
+// retention opportunistic without weakening the existing decode headroom.
+constexpr bool image_pipeline_should_retain_modal_cache(
+    bool constrained, bool cache_ready, bool cache_expired,
+    size_t psram_free, size_t psram_largest, size_t image_bytes,
+    size_t replacement_pipeline_bytes, size_t psram_headroom_bytes) {
+  if (!cache_ready || cache_expired) return false;
+  if (!constrained) return true;
+  if (image_bytes == 0 || psram_largest < image_bytes) return false;
+  return psram_free >= replacement_pipeline_bytes &&
+         psram_free - replacement_pipeline_bytes >= psram_headroom_bytes;
+}
+
+// The S3 transfer buffer grows before the decoder allocates its replacement
+// RGB surface. Preserve that future allocation and general PSRAM headroom at
+// every growth step instead of relying only on the pre-request estimate.
+constexpr bool background_transfer_psram_growth_preserves_reserve(
+    size_t psram_free, size_t current_capacity, size_t next_capacity,
+    size_t reserved_free_bytes) {
+  if (next_capacity <= current_capacity) return true;
+  const size_t growth = next_capacity - current_capacity;
+  return psram_free >= growth && psram_free - growth >= reserved_free_bytes;
+}
+
+constexpr bool background_transfer_psram_reserve_is_available(
+    size_t psram_free, size_t psram_largest, size_t reserved_free_bytes,
+    size_t reserved_largest_block_bytes) {
+  return psram_free >= reserved_free_bytes &&
+         psram_largest >= reserved_largest_block_bytes;
+}
+
+enum class ImagePipelineMemoryFailure : uint8_t {
+  NONE,
+  INTERNAL_FREE,
+  INTERNAL_LARGEST,
+  PSRAM_FREE,
+  PSRAM_LARGEST,
+};
+
+// Image surfaces and compressed staging live in PSRAM, while constrained S3
+// displays still need a small contiguous internal-RAM reserve for WiFi, HTTP,
+// and decoder bookkeeping. Check the pools independently so abundant PSRAM
+// cannot hide an unsafe internal heap.
+constexpr ImagePipelineMemoryFailure image_pipeline_memory_failure(
+    bool constrained, size_t internal_free, size_t internal_largest,
+    size_t psram_free, size_t psram_largest, size_t image_bytes,
+    size_t pipeline_bytes, size_t psram_headroom_bytes,
+    size_t constrained_internal_free_bytes,
+    size_t constrained_internal_largest_bytes) {
+  if (image_bytes == 0) return ImagePipelineMemoryFailure::NONE;
+  if (constrained && internal_free < constrained_internal_free_bytes) {
+    return ImagePipelineMemoryFailure::INTERNAL_FREE;
+  }
+  if (constrained && internal_largest < constrained_internal_largest_bytes) {
+    return ImagePipelineMemoryFailure::INTERNAL_LARGEST;
+  }
+  if (psram_free < pipeline_bytes ||
+      psram_free - pipeline_bytes < psram_headroom_bytes) {
+    return ImagePipelineMemoryFailure::PSRAM_FREE;
+  }
+  if (psram_largest < image_bytes) {
+    return ImagePipelineMemoryFailure::PSRAM_LARGEST;
+  }
+  return ImagePipelineMemoryFailure::NONE;
+}
+
+enum class BackgroundTransferTlsMode : uint8_t {
+  PLAIN_HTTP = 0,
+  VERIFIED_HTTPS = 1,
+  INSECURE_LOCAL_HTTPS = 2,
+};
+
+// Public HTTPS always uses the certificate bundle. The insecure mode is
+// reachable only when both the component setting and private/local host check
+// have opted in.
+constexpr BackgroundTransferTlsMode background_transfer_tls_mode(
+    bool https, bool private_or_local_host, bool allow_insecure_local_urls) {
+  if (!https) return BackgroundTransferTlsMode::PLAIN_HTTP;
+  return private_or_local_host && allow_insecure_local_urls
+             ? BackgroundTransferTlsMode::INSECURE_LOCAL_HTTPS
+             : BackgroundTransferTlsMode::VERIFIED_HTTPS;
+}
+
+constexpr bool background_transfer_result_is_current(
+    uint32_t expected_generation, uint32_t result_generation, bool cancelled) {
+  return !cancelled && expected_generation == result_generation;
+}
+
+// A completed background transfer has no downloader left to feed the decoder.
+// Synchronous decoders must therefore either finish from the buffered bytes or
+// fail the request; asynchronous decoders are allowed to complete later.
+constexpr bool background_transfer_decode_is_incomplete(bool finished,
+                                                        bool decoding) {
+  return !finished && !decoding;
+}
+
+constexpr bool background_transfer_should_follow_redirect(
+    bool redirect_event_received, bool location_available) {
+  return redirect_event_received && location_available;
+}
+
+inline std::string background_transfer_url_origin(const std::string &url) {
+  const size_t scheme_end = url.find("://");
+  if (scheme_end == std::string::npos) return {};
+  std::string scheme = url.substr(0, scheme_end);
+  std::transform(scheme.begin(), scheme.end(), scheme.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  if (scheme != "http" && scheme != "https") return {};
+
+  const size_t authority_start = scheme_end + 3;
+  const size_t authority_end = url.find_first_of("/?#", authority_start);
+  std::string authority = url.substr(
+      authority_start, authority_end == std::string::npos
+                           ? std::string::npos
+                           : authority_end - authority_start);
+  const size_t userinfo = authority.rfind('@');
+  if (userinfo != std::string::npos) authority = authority.substr(userinfo + 1);
+  if (authority.empty()) return {};
+  std::transform(authority.begin(), authority.end(), authority.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+
+  std::string host;
+  std::string port;
+  if (authority.front() == '[') {
+    const size_t bracket = authority.find(']');
+    if (bracket == std::string::npos) return {};
+    host = authority.substr(0, bracket + 1);
+    if (bracket + 1 < authority.size()) {
+      if (authority[bracket + 1] != ':') return {};
+      port = authority.substr(bracket + 2);
+    }
+  } else {
+    const size_t colon = authority.rfind(':');
+    if (colon == std::string::npos) {
+      host = authority;
+    } else {
+      host = authority.substr(0, colon);
+      port = authority.substr(colon + 1);
+    }
+  }
+  if (host.empty()) return {};
+  if (port.empty()) port = scheme == "https" ? "443" : "80";
+  return scheme + "://" + host + ":" + port;
+}
+
+inline bool background_transfer_same_origin(const std::string &left,
+                                            const std::string &right) {
+  const std::string left_origin = background_transfer_url_origin(left);
+  return !left_origin.empty() && left_origin == background_transfer_url_origin(right);
+}
+
+inline bool background_transfer_header_is_sensitive(const std::string &name) {
+  std::string lower = name;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return lower == "authorization" || lower == "proxy-authorization" ||
+         lower == "cookie" || lower == "api-key" || lower == "x-api-key" ||
+         lower.find("token") != std::string::npos ||
+         lower.find("secret") != std::string::npos;
+}
+
+// Resolve an HTTP Location value without asking ESP-IDF to follow it on the
+// existing client. The caller can then rebuild the client and select the TLS
+// policy for the redirect destination instead of inheriting the source policy.
+inline std::string background_transfer_resolve_redirect_url(
+    const std::string &base_url, const std::string &location) {
+  if (location.empty()) return {};
+
+  std::string target = location;
+  const size_t fragment = target.find('#');
+  if (fragment != std::string::npos) target.resize(fragment);
+  if (target.empty()) return {};
+
+  const auto is_http_url = [](const std::string &url) {
+    return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+  };
+  if (is_http_url(target)) return target;
+  if (target.find("://") != std::string::npos) return {};
+
+  const size_t scheme_end = base_url.find("://");
+  if (scheme_end == std::string::npos || !is_http_url(base_url)) return {};
+  const size_t authority_start = scheme_end + 3;
+  const size_t path_start = base_url.find_first_of("/?#", authority_start);
+  const std::string origin = base_url.substr(
+      0, path_start == std::string::npos ? base_url.size() : path_start);
+  if (origin.size() <= authority_start) return {};
+
+  if (target.rfind("//", 0) == 0) {
+    return base_url.substr(0, scheme_end + 1) + target;
+  }
+
+  std::string base_path =
+      path_start == std::string::npos || base_url[path_start] != '/'
+          ? "/"
+          : base_url.substr(path_start);
+  const size_t base_suffix = base_path.find_first_of("?#");
+  if (base_suffix != std::string::npos) base_path.resize(base_suffix);
+
+  if (target.front() == '?') return origin + base_path + target;
+
+  std::string path;
+  if (target.front() == '/') {
+    path = target;
+  } else {
+    const size_t slash = base_path.rfind('/');
+    path = base_path.substr(0, slash == std::string::npos ? 0 : slash + 1) + target;
+  }
+
+  std::string suffix;
+  const size_t query = path.find('?');
+  if (query != std::string::npos) {
+    suffix = path.substr(query);
+    path.resize(query);
+  }
+
+  std::vector<std::string> segments;
+  for (size_t start = 0; start <= path.size();) {
+    const size_t end = path.find('/', start);
+    const std::string segment = path.substr(
+        start, end == std::string::npos ? std::string::npos : end - start);
+    if (segment == "..") {
+      if (!segments.empty()) segments.pop_back();
+    } else if (!segment.empty() && segment != ".") {
+      segments.push_back(segment);
+    }
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+
+  std::string normalized = "/";
+  for (size_t i = 0; i < segments.size(); ++i) {
+    if (i != 0) normalized.push_back('/');
+    normalized += segments[i];
+  }
+  return origin + normalized + suffix;
+}
+
+// Only a current, successful, bounded transfer can hand bytes back to the
+// decoder. HTTP 304 is a successful cache result and intentionally has no
+// payload.
+constexpr bool background_transfer_result_can_publish(
+    uint32_t expected_generation, uint32_t result_generation, bool cancelled,
+    bool transport_ok, bool allocation_ok, bool http_status_ok,
+    bool not_modified, size_t response_size, size_t maximum_size) {
+  return background_transfer_result_is_current(
+             expected_generation, result_generation, cancelled) &&
+         transport_ok && allocation_ok && http_status_ok &&
+         (not_modified || (response_size > 0 && response_size <= maximum_size));
+}
 
 // Higher-priority requests win. Equal-priority requests keep their original
 // submission order so a busy camera page cannot starve its first tile.
@@ -21,7 +303,8 @@ constexpr bool p4_pipeline_candidate_precedes(uint8_t candidate_priority,
 constexpr bool p4_pipeline_result_is_current(uint32_t expected_generation,
                                              uint32_t result_generation,
                                              bool cancelled) {
-  return !cancelled && expected_generation == result_generation;
+  return background_transfer_result_is_current(
+      expected_generation, result_generation, cancelled);
 }
 
 // Home Assistant's local media proxy can provide valid image bytes while the
@@ -29,15 +312,6 @@ constexpr bool p4_pipeline_result_is_current(uint32_t expected_generation,
 // downloader behaviour without weakening status checks for other URLs.
 constexpr bool p4_pipeline_http_status_is_success(int status, bool ha_media_proxy) {
   return status == 200 || status == 304 || (status <= 0 && ha_media_proxy);
-}
-
-// Modal work may cancel an active or queued tile to become responsive. The
-// interrupted tile still needs another turn or its card can remain blank after
-// the modal closes.
-constexpr bool image_pipeline_should_requeue_interrupted_tile(bool was_active_or_queued,
-                                                              bool context_active,
-                                                              bool has_source_url) {
-  return was_active_or_queued && context_active && has_source_url;
 }
 
 // A startup download can finish before its card callback is attached. The
@@ -50,10 +324,13 @@ constexpr bool image_pipeline_completion_needs_recovery(bool image_ready,
 
 // A modal-quality image is reusable only while every part of its cache key
 // still matches. Camera and image entities can keep the same entity ID while
-// publishing a new source URL.
+// publishing a new source URL. Only constrained displays apply the short
+// cache lifetime; standard P4 displays retain their modal cache indefinitely.
 constexpr bool image_pipeline_modal_cache_matches(bool ready, bool same_image,
-                                                   bool same_entity, bool same_source) {
-  return ready && same_image && same_entity && same_source;
+                                                   bool same_entity, bool same_source,
+                                                   bool constrained, bool expired) {
+  return ready && same_image && same_entity && same_source &&
+         (!constrained || !expired);
 }
 
 // A modal needs either a usable tile preview or a source it can request. With
@@ -115,10 +392,6 @@ constexpr bool image_pipeline_should_preempt_stale_modal(bool switching_context,
 // Starting the next queued tile inline is safe only when download and decode
 // work run on the background pipeline. Modal requests are still deferred so
 // LVGL can paint the cached preview before full-resolution work starts.
-constexpr bool image_pipeline_can_start_followup_inline(bool background_pipeline) {
-  return background_pipeline;
-}
-
 // Reserve a known HTTP response in one allocation. Chunked responses and
 // inaccurate Content-Length values retain bounded geometric growth.
 constexpr size_t p4_pipeline_transfer_capacity(size_t current_capacity,

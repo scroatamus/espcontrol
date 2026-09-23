@@ -1,8 +1,46 @@
-import { liveGlobal, staticGlobal, type GlobalDescriptors } from "../runtime/globals";
-export function installArtworkPostApiModule(): GlobalDescriptors {
+import { normalizeCoverArtDelay, normalizeHomeAssistantArtworkEndpointMode, normalizeHomeAssistantArtworkProtocol, normalizeScreensaverCameraImageMode } from "../model/settings";
+import type { EntityStateFeature } from "./entity_state";
+import type { ApplicationApiFeature } from "./api";
+export interface ArtworkPostApiFeature {
+    postPresenceSensorEntity(value?: any): any;
+    postScreensaverCameraEntity(value?: any): any;
+    postScreensaverCameraImageMode(value?: any): any;
+    postMediaPlayerSleepPrevention(on?: any): any;
+    postMediaPlayerSleepPreventionEntity(value?: any): any;
+    postCoverArtPlaybackControl(on?: any): any;
+    postCoverArtScreensaver(on?: any): any;
+    postClockOverlay(on?: any): any;
+    postMetadataOverlay(on?: any): any;
+    postCoverArtMediaPlayerEntity(value?: any): any;
+    postCoverArtSecondaryMediaPlayerEntity(value?: any): any;
+    postCoverArtConditions(value?: any): any;
+    coverArtHideExternalInputPostUrls(on?: any): any;
+    postCoverArtHideExternalInput(on?: any): any;
+    coverArtDelayPostUrls(value?: any): any;
+    postCoverArtDelay(value?: any): any;
+    coverArtTrackOverlayDurationPostUrls(value?: any): any;
+    postCoverArtTrackOverlayDuration(value?: any): any;
+    homeAssistantArtworkPortPostUrls(value?: any): any;
+    postHomeAssistantArtworkPort(value?: any): any;
+    postHomeAssistantArtworkProtocol(value?: any): any;
+    postHomeAssistantArtworkEndpointMode(value?: any): any;
+}
+
+export function createArtworkPostApiFeature(
+    entityState: Pick<EntityStateFeature, "entityName" | "entityObjectIds" | "entityPostUrls">,
+    requestApi: Pick<ApplicationApiFeature, "post" | "postTextWithObjectIds" | "postSwitchWithObjectIds" | "postSelectWithObjectIds">,
+): ArtworkPostApiFeature {
+    const { entityName, entityObjectIds, entityPostUrls } = entityState;
+    const { post, postTextWithObjectIds, postSwitchWithObjectIds, postSelectWithObjectIds } = requestApi;
     // ── Artwork Post API ──────────────────────────────────────────────────
     function postPresenceSensorEntity(this: any, value?: any) {
         return postTextWithObjectIds(entityName("presence_sensor_entity"), entityObjectIds("presence_sensor_entity"), value);
+    }
+    function postScreensaverCameraEntity(this: any, value?: any) {
+        return postTextWithObjectIds(entityName("screen_saver_camera_entity"), entityObjectIds("screen_saver_camera_entity"), value);
+    }
+    function postScreensaverCameraImageMode(this: any, value?: any) {
+        return postSelectWithObjectIds(entityName("screen_saver_camera_image_mode"), entityObjectIds("screen_saver_camera_image_mode"), normalizeScreensaverCameraImageMode(value));
     }
     function postMediaPlayerSleepPrevention(this: any, on?: any) {
         return postSwitchWithObjectIds(entityName("screen_saver_media_player_sleep_prevention"), entityObjectIds("screen_saver_media_player_sleep_prevention"), on);
@@ -10,8 +48,17 @@ export function installArtworkPostApiModule(): GlobalDescriptors {
     function postMediaPlayerSleepPreventionEntity(this: any, value?: any) {
         return postTextWithObjectIds(entityName("media_player_sleep_prevention_entity"), entityObjectIds("media_player_sleep_prevention_entity"), value);
     }
+    function postCoverArtPlaybackControl(this: any, on?: any) {
+        return postSwitchWithObjectIds(entityName("screen_saver_cover_art_playback_control"), entityObjectIds("screen_saver_cover_art_playback_control"), on);
+    }
     function postCoverArtScreensaver(this: any, on?: any) {
         return postSwitchWithObjectIds(entityName("screen_saver_cover_art"), entityObjectIds("screen_saver_cover_art"), on);
+    }
+    function postClockOverlay(this: any, on?: any) {
+        return postSwitchWithObjectIds(entityName("screen_saver_clock_overlay"), entityObjectIds("screen_saver_clock_overlay"), on);
+    }
+    function postMetadataOverlay(this: any, on?: any) {
+        return postSwitchWithObjectIds(entityName("screen_saver_metadata_overlay"), entityObjectIds("screen_saver_metadata_overlay"), on);
     }
     function postCoverArtMediaPlayerEntity(this: any, value?: any) {
         return postTextWithObjectIds(entityName("screen_saver_cover_art_entity"), entityObjectIds("screen_saver_cover_art_entity"), value);
@@ -49,22 +96,31 @@ export function installArtworkPostApiModule(): GlobalDescriptors {
     function postHomeAssistantArtworkProtocol(this: any, value?: any) {
         return postSelectWithObjectIds(entityName("home_assistant_artwork_protocol"), entityObjectIds("home_assistant_artwork_protocol"), normalizeHomeAssistantArtworkProtocol(value));
     }
+    function postHomeAssistantArtworkEndpointMode(this: any, value?: any) {
+        return postSelectWithObjectIds(entityName("home_assistant_artwork_endpoint_mode"), entityObjectIds("home_assistant_artwork_endpoint_mode"), normalizeHomeAssistantArtworkEndpointMode(value));
+    }
     return {
-        "postPresenceSensorEntity": staticGlobal(postPresenceSensorEntity),
-        "postMediaPlayerSleepPrevention": staticGlobal(postMediaPlayerSleepPrevention),
-        "postMediaPlayerSleepPreventionEntity": staticGlobal(postMediaPlayerSleepPreventionEntity),
-        "postCoverArtScreensaver": staticGlobal(postCoverArtScreensaver),
-        "postCoverArtMediaPlayerEntity": staticGlobal(postCoverArtMediaPlayerEntity),
-        "postCoverArtSecondaryMediaPlayerEntity": staticGlobal(postCoverArtSecondaryMediaPlayerEntity),
-        "postCoverArtConditions": staticGlobal(postCoverArtConditions),
-        "coverArtHideExternalInputPostUrls": staticGlobal(coverArtHideExternalInputPostUrls),
-        "postCoverArtHideExternalInput": staticGlobal(postCoverArtHideExternalInput),
-        "coverArtDelayPostUrls": staticGlobal(coverArtDelayPostUrls),
-        "postCoverArtDelay": staticGlobal(postCoverArtDelay),
-        "coverArtTrackOverlayDurationPostUrls": staticGlobal(coverArtTrackOverlayDurationPostUrls),
-        "postCoverArtTrackOverlayDuration": staticGlobal(postCoverArtTrackOverlayDuration),
-        "homeAssistantArtworkPortPostUrls": staticGlobal(homeAssistantArtworkPortPostUrls),
-        "postHomeAssistantArtworkPort": staticGlobal(postHomeAssistantArtworkPort),
-        "postHomeAssistantArtworkProtocol": staticGlobal(postHomeAssistantArtworkProtocol),
+        postPresenceSensorEntity,
+        postScreensaverCameraEntity,
+        postScreensaverCameraImageMode,
+        postMediaPlayerSleepPrevention,
+        postMediaPlayerSleepPreventionEntity,
+        postCoverArtPlaybackControl,
+        postCoverArtScreensaver,
+        postClockOverlay,
+        postMetadataOverlay,
+        postCoverArtMediaPlayerEntity,
+        postCoverArtSecondaryMediaPlayerEntity,
+        postCoverArtConditions,
+        coverArtHideExternalInputPostUrls,
+        postCoverArtHideExternalInput,
+        coverArtDelayPostUrls,
+        postCoverArtDelay,
+        coverArtTrackOverlayDurationPostUrls,
+        postCoverArtTrackOverlayDuration,
+        homeAssistantArtworkPortPostUrls,
+        postHomeAssistantArtworkPort,
+        postHomeAssistantArtworkProtocol,
+        postHomeAssistantArtworkEndpointMode,
     };
 }

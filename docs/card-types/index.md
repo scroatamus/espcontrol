@@ -1,5 +1,5 @@
 ---
-title: Card Types
+title: "Home Assistant Card Types"
 description:
   Quick reference for choosing the right EspControl card type for Home Assistant controls, sensors, local panel actions, and subpages.
 ---
@@ -24,7 +24,7 @@ Use this page when you know what you want the panel to do but are not sure which
 | Call an HTTP URL directly from the panel | [Webhook](/card-types/webhooks) | URL |
 | Show a live number, readable duration, text state, or active/inactive icon | [Sensor](/card-types/sensors) | Home Assistant `sensor`, `binary_sensor`, or `text_sensor`; or a Local Sensor source |
 | Show a door or window contact sensor | [Doors & Windows](/card-types/doors-windows) | `binary_sensor` or `sensor` |
-| Show presence, motion, person, or tracker state | [Presence](/card-types/presence) | `binary_sensor`, `sensor`, `text_sensor`, `person`, or tracker helpers |
+| Show presence, motion, or occupancy state | [Presence](/card-types/presence) | `binary_sensor`, `sensor`, or `text_sensor` |
 | Drag to set light brightness or fan speed | [Slider](/card-types/sliders) | `light` or `fan` |
 | Use grouped fan controls | [Fans](/card-types/fans) | `fan` |
 | Control blinds, shutters, shades, gates, position, or tilt | [Cover](/card-types/covers) | `cover` |
@@ -32,10 +32,12 @@ Use this page when you know what you want the panel to do but are not sure which
 | Open, close, or stop a gate | [Gate](/card-types/gates) | `cover` |
 | Lock or unlock a door lock | [Lock](/card-types/locks) | `lock` |
 | Arm, disarm, or show an alarm panel | [Alarm](/card-types/alarms) | `alarm_control_panel` |
+| Start, cancel, or resume a countdown | [Timer](/card-types/timers) | `timer` |
 | Show local date, time, or date and time | [Date & Time](/card-types/calendar) | No entity required for clock modes |
 | Show another city or timezone | [World Clock](/card-types/timezones) | No entity required |
 | Show current weather or daily high/low temperatures | [Weather](/card-types/weather) | `weather` |
 | Show a still image from Home Assistant | [Camera](/card-types/cameras) | `camera` or `image` |
+| Let visitors scan guest Wifi details | [Wifi Sharing](/card-types/wifi-share) | No entity required |
 | Control media playback, volume, progress, or now-playing display | [Media](/card-types/media) | `media_player` |
 | Control a thermostat or HVAC entity | [Climate](/card-types/climate) | `climate` |
 | Control a built-in relay on the panel itself | [Internal Switches](/card-types/internal-relays) | Built-in relay |
@@ -54,6 +56,7 @@ Some cards do not need a Home Assistant entity:
 - **Action > Local Action** runs a registered callback on the panel itself.
 - **Date & Time**, **World Clock**, **Screen Lock**, and **Subpage** can work from the panel itself.
 - **Internal Switches** controls built-in relay hardware on supported panels.
+- **Wifi Sharing** stores separately configured guest-network credentials on the panel.
 
 ## Grouped Card Types
 
@@ -62,15 +65,17 @@ Some names in the setup page group several related modes:
 | Setup page name | Modes |
 |---|---|
 | **Lights** | All Controls, Switch, Brightness, Colour Temperature |
-| **Fans** | Switch, Speed, Oscillation, Direction, Preset |
-| **Action** | Scene, Script, Automation, Button, Helper, Option Select, Local Action |
+| **Fans** | All Controls, Switch, Speed, Oscillation, Direction, Preset |
+| **Action** | Scene, Script, Automation, Button, Input Button, Toggle Helper, Set Number Helper, Option Select, Local Action |
 | **Vacuum** | Status, Start / Stop, Dock, Pause / Resume, Spot Clean, Locate, Clean Area |
 | **Lawn Mower** | Status, Start Mowing, Dock, Pause / Resume |
-| **Alarm** | Combined Control, Arm Away, Arm Home, Arm Night, Arm Vacation, Disarm |
+| **Alarm** | All Controls, Arm Away, Arm Home, Arm Night, Arm Vacation, Disarm |
 | **Date & Time** | Clock, Date, Time & Date, World Clock |
-| **Media** | Play/Pause, Previous, Next, Volume, Track Position, Now Playing |
+| **Media** | All Controls, Speaker Group, Play/Pause, Previous, Next, Volume, Track Position, Now Playing, Cover Art, Media Content |
 | **Cover** | All Controls, Position, Tilt, Toggle, Open, Close, Stop, Set Position |
 | **Subpage** | Generic, Switch, Lights, Climate, Presence, Media, Alarm, Cover, Garage Door, Gate, Lock, Vacuum, Lawn Mower, Weather, Sensor, Camera / Image |
+
+Older configurations may also show **Weather Forecast**. It is kept for compatibility and is now set up as a **Weather** card with **Temperatures Tomorrow** selected.
 
 ## Permissions
 
@@ -80,4 +85,4 @@ Read-only display cards such as Sensor, Presence, Date & Time, and current Weath
 
 ## Current Capability Reference
 
-For a generated table of card type names, saved type values, supported entity domains, subpage support, picker grouping, options, and visibility status, see the [Card Capability Reference](/generated/cards/capabilities).
+For a generated table of card type names, saved type values, supported entity domains, subpage support, picker grouping, options, and visibility status, see the [Card Capability Reference](/reference/card-capabilities).

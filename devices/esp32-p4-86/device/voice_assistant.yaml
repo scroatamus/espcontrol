@@ -11,8 +11,59 @@
 # =============================================================================
 
 external_components:
-  - source: github://n-IA-hane/esphome-audio-stack@3c30b96ad2540f676eadd30bdbb93104b105dee0
+  # v2026.7.0 fixes ESPHome 2026.7's portable integer format warnings.
+  - source: github://n-IA-hane/esphome-audio-stack@v2026.7.0
     components: [esp_audio_stack, esp_afe]
+
+# Temporary issue #1701 diagnostics. Keep these on the diagnostic branch until
+# the first failure and any crash backtrace have been captured on hardware.
+esphome:
+  includes:
+    - <esp_heap_caps.h>
+
+logger:
+  level: DEBUG
+
+interval:
+  # This runs on the main loop, so snapshots continue when the audio task stops.
+  - interval: 5s
+    then:
+      - lambda: |-
+          const bool running = id(voice_audio_stack).is_running();
+          const bool error = id(voice_audio_stack).has_i2s_error();
+          const bool ready = id(voice_afe_processor).is_initialized();
+          const bool enabled = id(voice_services_enabled).state;
+          const bool muted = id(master_mute_switch).state;
+          const bool wake = id(onboard_wake_word).is_running();
+          const bool assistant = id(ha_voice_assistant).is_running();
+          const bool connected = api::global_api_server->is_connected();
+          const unsigned flags = running | (error << 1) | (ready << 2) |
+              (enabled << 3) | (muted << 4) | (wake << 5) |
+              (assistant << 6) | (connected << 7);
+          static unsigned previous_flags = 0xFFFFFFFFu;
+          const char *edge = flags == previous_flags ? "steady" : "changed";
+          previous_flags = flags;
+          ESP_LOGD("voice.diag",
+                   "uptime_ms=%lu %s running=%d i2s_error=%d afe_ready=%d enabled=%d muted=%d wake=%d assistant=%d api=%d",
+                   (unsigned long) millis(), edge, running, error, ready,
+                   enabled, muted, wake, assistant, connected);
+          // Atomic cumulative counters: feed_ok is bridge delivery, not proof
+          // that ESP-SR accepted or processed the samples. Levels are dBFS.
+          const auto t = id(voice_afe_processor).telemetry();
+          ESP_LOGD("voice.diag",
+                   "total frames=%lu glitch=%lu in_drop=%lu feed_ok=%lu feed_rej=%lu fetch_ok=%lu fetch_to=%lu out_drop=%lu",
+                   (unsigned long) t.frame_count, (unsigned long) t.glitch_count,
+                   (unsigned long) t.input_ring_drop, (unsigned long) t.feed_ok,
+                   (unsigned long) t.feed_rejected, (unsigned long) t.fetch_ok,
+                   (unsigned long) t.fetch_timeout, (unsigned long) t.output_ring_drop);
+          ESP_LOGD("voice.diag",
+                   "queue feed=%lu fetch=%lu input_dbfs=%.1f output_dbfs=%.1f internal_free=%u internal_largest=%u dma_free=%u dma_largest=%u",
+                   (unsigned long) t.feed_queue_frames, (unsigned long) t.fetch_queue_frames,
+                   t.input_volume_dbfs, t.output_rms_dbfs,
+                   (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                   (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                   (unsigned) heap_caps_get_free_size(MALLOC_CAP_DMA),
+                   (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
 
 esp_afe:
   id: voice_afe_processor
@@ -39,6 +90,8 @@ esp_afe:
 
 esp_audio_stack:
   id: voice_audio_stack
+  telemetry: true
+  telemetry_log_interval_frames: 128
   i2s_mclk_pin: GPIO13
   i2s_bclk_pin: GPIO12
   i2s_lrclk_pin: GPIO10
@@ -118,7 +171,28 @@ speaker:
     buffer_duration: 500ms
     task_stack_in_psram: true
 
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: true
+
+media_source:
+  - platform: sendspin
+    id: sendspin_media_source
+    sendspin_id: sendspin_hub
+    task_stack_in_psram: true
+    buffer_size: 1000000
+    sample_rate: 48000
+
 media_player:
+  - platform: speaker_source
+    id: sendspin_output_player
+    name: SendSpin Player
+    icon: mdi:music-box-outline
+    media_pipeline:
+      speaker: voice_media_resampling_speaker
+      sources: [sendspin_media_source]
+      format: NONE
+
   - platform: speaker
     id: voice_media_player
     name: Voice Media Player
@@ -185,6 +259,7 @@ media_player:
                   voice_assistant.is_running:
               - not:
                   media_player.is_announcing:
+                    id: voice_media_player
           then:
             - mixer_speaker.apply_ducking:
                 id: voice_media_mixing_input
@@ -376,6 +451,7 @@ micro_wake_word:
                       or:
                         - voice_assistant.is_running:
                         - media_player.is_announcing:
+                            id: voice_media_player
                     then:
                       - if:
                           condition:
@@ -389,6 +465,7 @@ micro_wake_word:
                       - if:
                           condition:
                             media_player.is_playing:
+                              id: voice_media_player
                           then:
                             - if:
                                 condition:
@@ -743,6 +820,7 @@ script:
                   voice_assistant.is_running:
               - not:
                   media_player.is_announcing:
+                    id: voice_media_player
           timeout: 5s
       - if:
           condition:
@@ -778,6 +856,7 @@ script:
           condition:
             not:
               media_player.is_playing:
+                id: voice_media_player
           timeout: 2s
       - if:
           condition:
@@ -855,17 +934,21 @@ script:
   - id: restore_voice_home_ui
     mode: restart
     then:
-      - script.stop: cover_art_delay_timer
-      - script.stop: show_cover_art_view
-      - script.stop: cover_art_show_track_overlay
-      - script.execute: screensaver_wake
-      - script.wait: screensaver_wake
-      - script.execute: hide_cover_art_view
-      - script.wait: hide_cover_art_view
-      - lambda: |-
-          navigation_return_home(id(main_page)->obj);
-      - delay: 50ms
-      - script.execute: clock_bar_apply
+      - if:
+          condition:
+            lambda: return !id(alarm_delay_audio_session_active);
+          then:
+            - script.stop: cover_art_delay_timer
+            - script.stop: show_cover_art_view
+            - script.stop: cover_art_show_track_overlay
+            - script.execute: screensaver_wake
+            - script.wait: screensaver_wake
+            - script.execute: hide_cover_art_view
+            - script.wait: hide_cover_art_view
+            - lambda: |-
+                navigation_return_home(id(main_page)->obj);
+            - delay: 50ms
+            - script.execute: clock_bar_apply
 
   - id: release_voice_after_response
     mode: restart
@@ -878,6 +961,7 @@ script:
       - if:
           condition:
             media_player.is_announcing:
+              id: voice_media_player
           then:
             - logger.log:
                 level: WARN
@@ -902,8 +986,10 @@ script:
             and:
               - not:
                   media_player.is_announcing:
+                    id: voice_media_player
               - not:
                   media_player.is_playing:
+                    id: voice_media_player
           then:
             - switch.turn_off: speaker_amplifier_enable
       - script.execute: apply_restored_voice_wake_word
@@ -1328,15 +1414,18 @@ voice_assistant:
           - wait_until:
               condition:
                 - media_player.is_announcing:
+                    id: voice_media_player
               timeout: 500ms
           - wait_until:
               condition:
                 not:
                   media_player.is_announcing:
+                    id: voice_media_player
               timeout: 90s
           - if:
               condition:
                 media_player.is_announcing:
+                  id: voice_media_player
               then:
                 - logger.log:
                     level: WARN
@@ -1356,8 +1445,10 @@ voice_assistant:
                 and:
                   - not:
                       media_player.is_announcing:
+                        id: voice_media_player
                   - not:
                       media_player.is_playing:
+                        id: voice_media_player
               then:
                 - switch.turn_off: speaker_amplifier_enable
           - script.execute: apply_restored_voice_wake_word

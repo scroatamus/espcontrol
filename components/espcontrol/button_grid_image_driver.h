@@ -1,5 +1,7 @@
 #pragma once
 
+#include "card_modal_target.h"
+
 // Shared lifecycle driver for Image cards. The downloader, cache, geometry,
 // and modal implementation remain in button_grid_image.h; this driver owns
 // the grid and subpage lifecycle boundary.
@@ -8,8 +10,7 @@
 namespace espcontrol::cards {
 
 inline bool image_driver_matches(const Context &context) {
-  return !context.legacy_dispatch &&
-         context.runtime.driver == card_runtime::CardDriverId::IMAGE;
+  return context.runtime.driver == card_runtime::CardDriverId::IMAGE;
 }
 
 inline bool image_driver_setup_visual(
@@ -44,7 +45,7 @@ inline bool image_driver_refresh_layout(
     }
   }
   if (slot.text_lbl && !lv_obj_has_flag(slot.text_lbl, LV_OBJ_FLAG_HIDDEN)) {
-    image_card_align_label_stack(slot.text_lbl, slot.btn);
+    image_card_align_label_stack(slot.text_lbl, slot.btn, slot.icon_lbl);
   }
   if (slot.icon_lbl && !lv_obj_has_flag(slot.icon_lbl, LV_OBJ_FLAG_HIDDEN)) {
     image_card_align_icon(slot.icon_lbl, slot.btn);
@@ -86,6 +87,16 @@ inline bool image_driver_handle_main_click(
     ? static_cast<ImageCardCtx *>(lv_obj_get_user_data(button)) : nullptr;
   if (image_context) image_card_open_modal(image_context);
   return true;
+}
+
+// Explicit modal-only route; it must never activate the card's command path.
+inline ModalTarget image_driver_modal_target(
+    const Context &context, const ParsedCfg &config, lv_obj_t *button) {
+  if (!image_driver_matches(context)) return {};
+  auto *runtime = button
+    ? static_cast<ImageCardCtx *>(lv_obj_get_user_data(button)) : nullptr;
+  return modal_target(runtime, config.entity, ControlModalKind::IMAGE_CARD,
+                      image_card_can_open_modal(runtime), image_card_open_modal);
 }
 
 }  // namespace espcontrol::cards

@@ -40,11 +40,13 @@ SAVED_CONFIG_WEBHOOK_HEADER = ROOT / "components" / "espcontrol" / "button_grid_
 SAVED_CONFIG_SUBPAGE_HEADER = ROOT / "components" / "espcontrol" / "button_grid_saved_config_subpage_generated.h"
 SAVED_CONFIG_SWITCH_HEADER = ROOT / "components" / "espcontrol" / "button_grid_saved_config_switch_generated.h"
 BACKLIGHT_HEADER = ROOT / "components" / "espcontrol" / "backlight.h"
+BACKLIGHT_FADE_HEADER = ROOT / "components" / "espcontrol" / "backlight_fade.h"
 DISPLAY_MODE_CONTROLLER_HEADER = ROOT / "components" / "espcontrol" / "display_mode_controller.h"
 CLOCK_BAR_HEADER = ROOT / "components" / "espcontrol" / "clock_bar.h"
 LAYOUT_HEADER = ROOT / "components" / "espcontrol" / "button_grid_layout.h"
 LIMITS_HEADER = ROOT / "components" / "espcontrol" / "button_grid_limits.h"
 STRING_HEADER = ROOT / "components" / "espcontrol" / "button_grid_string.h"
+DISPLAY_TEXT_HEADER = ROOT / "components" / "espcontrol" / "display_text.h"
 BUTTON_GRID_FACADE = ROOT / "components" / "espcontrol" / "button_grid.h"
 CARD_NORMALIZATION_FIXTURES = ROOT / "common" / "config" / "card_normalization_fixtures.json"
 DEVICES_DIR = ROOT / "devices"
@@ -80,9 +82,19 @@ class StringRef {
 };
 }
 
+struct lv_event_t;
+using lv_event_cb_t = void (*)(lv_event_t *);
+struct TestEventHandler { lv_event_cb_t callback; int code; void *data; };
 struct lv_obj_t {
+  lv_obj_t *parent = nullptr;
+  std::vector<lv_obj_t *> children;
+  std::vector<TestEventHandler> handlers;
   int flags = 0;
+  int transform_scale_x = 256;
+  int transform_scale_y = 256;
   std::string text;
+  int width = 480;
+  void *user_data = nullptr;
 };
 constexpr int MAX_GRID_SLOTS = 25;
 inline int bounded_grid_slots(int num_slots) {
@@ -100,7 +112,7 @@ struct BtnSlot {
   lv_obj_t *subpage_lbl = nullptr;
 };
 struct lv_disp_t {};
-struct lv_font_t {};
+struct lv_font_t { int line_height = 16; };
 using lv_coord_t = int;
 using lv_style_selector_t = int;
 using lv_color_t = int;
@@ -124,6 +136,7 @@ constexpr int LV_LABEL_LONG_CLIP = 1;
 constexpr int LV_TEXT_ALIGN_LEFT = 0;
 constexpr int LV_TEXT_ALIGN_CENTER = 1;
 constexpr int LV_TEXT_ALIGN_RIGHT = 2;
+constexpr int LV_SIZE_CONTENT = -1;
 constexpr int LV_ALIGN_TOP_LEFT = 0;
 constexpr int LV_ALIGN_TOP_MID = 1;
 constexpr int LV_ALIGN_TOP_RIGHT = 2;
@@ -139,14 +152,24 @@ constexpr int LV_GRAD_DIR_HOR = 1;
 inline int lv_color_hex(uint32_t value) { return static_cast<int>(value); }
 inline int lv_pct(int value) { return value; }
 inline lv_obj_t *lv_scr_act() { return lv_active_screen; }
-inline void lv_obj_set_style_transform_scale_x(lv_obj_t *, int, int) {}
-inline void lv_obj_set_style_transform_scale_y(lv_obj_t *, int, int) {}
+inline void lv_obj_set_style_transform_scale_x(lv_obj_t *obj, int scale, int) {
+  if (obj) obj->transform_scale_x = scale;
+}
+inline void lv_obj_set_style_transform_scale_y(lv_obj_t *obj, int scale, int) {
+  if (obj) obj->transform_scale_y = scale;
+}
 inline void lv_obj_set_style_bg_color(lv_obj_t *, int, lv_style_selector_t) {}
 inline void lv_obj_set_style_bg_grad_color(lv_obj_t *, lv_color_t, lv_style_selector_t) {}
 inline void lv_obj_set_style_bg_grad_dir(lv_obj_t *, int, lv_style_selector_t) {}
 inline void lv_obj_set_style_text_color(lv_obj_t *, lv_color_t, lv_style_selector_t) {}
 inline void lv_obj_set_style_text_align(lv_obj_t *, int, lv_style_selector_t) {}
 inline lv_color_t lv_obj_get_style_text_color(lv_obj_t *, lv_style_selector_t) { return 0; }
+inline int lv_font_get_line_height(const lv_font_t *) { return 20; }
+inline int lv_obj_get_style_text_line_space(lv_obj_t *, lv_style_selector_t) { return 0; }
+inline const lv_font_t *lv_obj_get_style_text_font(lv_obj_t *, lv_style_selector_t) {
+  static const lv_font_t font;
+  return &font;
+}
 inline void lv_obj_set_style_opa(lv_obj_t *, int, int) {}
 inline void lv_obj_set_style_text_opa(lv_obj_t *, int, int) {}
 inline void lv_obj_add_state(lv_obj_t *, int) {}
@@ -157,7 +180,7 @@ inline void lv_obj_clear_flag(lv_obj_t *obj, int flag) { if (obj) obj->flags &= 
 inline bool lv_obj_has_flag(lv_obj_t *obj, int flag) { return obj && (obj->flags & flag); }
 inline uint32_t lv_obj_get_child_cnt(lv_obj_t *) { return 0; }
 inline lv_obj_t *lv_obj_get_child(lv_obj_t *, uint32_t) { return nullptr; }
-inline int lv_obj_get_width(lv_obj_t *) { return 480; }
+inline int lv_obj_get_width(lv_obj_t *obj) { return obj ? obj->width : 480; }
 inline int lv_obj_get_height(lv_obj_t *) { return 480; }
 inline int lv_obj_get_style_pad_left(lv_obj_t *, int) { return 0; }
 inline int lv_obj_get_style_pad_right(lv_obj_t *, int) { return 0; }
@@ -165,21 +188,53 @@ inline int lv_obj_get_style_pad_top(lv_obj_t *, int) { return 0; }
 inline int lv_obj_get_style_pad_bottom(lv_obj_t *, int) { return 0; }
 inline int lv_obj_get_style_pad_column(lv_obj_t *, int) { return 0; }
 inline int lv_obj_get_style_pad_row(lv_obj_t *, int) { return 0; }
-inline lv_obj_t *lv_obj_get_parent(lv_obj_t *) { return nullptr; }
+inline lv_obj_t *lv_obj_get_parent(lv_obj_t *obj) { return obj->parent; }
+inline void *lv_obj_get_user_data(lv_obj_t *obj) { return obj ? obj->user_data : nullptr; }
 inline lv_disp_t *lv_disp_get_default() { return lv_test_disp_available ? &lv_test_default_disp : nullptr; }
 inline int lv_disp_get_hor_res(lv_disp_t *) { return lv_test_hor_res; }
 inline int lv_disp_get_ver_res(lv_disp_t *) { return lv_test_ver_res; }
 inline void lv_label_set_long_mode(lv_obj_t *, int) {}
 inline void lv_obj_set_size(lv_obj_t *, int, int) {}
-inline void lv_obj_set_width(lv_obj_t *, int) {}
+inline void lv_obj_set_width(lv_obj_t *obj, int width) { if (obj) obj->width = width; }
 inline void lv_obj_set_height(lv_obj_t *, int) {}
 inline void lv_obj_set_pos(lv_obj_t *, int, int) {}
 inline void lv_obj_set_grid_cell(lv_obj_t *, int, int, int, int, int, int) {}
 inline void lv_obj_set_style_pad_top(lv_obj_t *, int, int) {}
 inline void lv_obj_update_layout(lv_obj_t *) {}
 inline void lv_label_set_text(lv_obj_t *obj, const char *text) { if (obj) obj->text = text ? text : ""; }
+inline const char *lv_label_get_text(lv_obj_t *obj) { return obj ? obj->text.c_str() : ""; }
 inline void lv_obj_align(lv_obj_t *, int, int, int) {}
-inline void lv_obj_move_foreground(lv_obj_t *) {}
+constexpr int LV_EVENT_CHILD_CHANGED = 1;
+constexpr int LV_EVENT_DELETE = 2;
+struct lv_event_t { lv_obj_t *target; void *data; };
+inline void *lv_event_get_user_data(lv_event_t *event) { return event->data; }
+inline lv_obj_t *lv_event_get_target(lv_event_t *event) { return event->target; }
+inline void lv_obj_add_event_cb(lv_obj_t *obj, lv_event_cb_t cb, int code, void *data) {
+  obj->handlers.push_back({cb, code, data});
+}
+inline void lv_obj_remove_event_cb_with_user_data(lv_obj_t *obj, lv_event_cb_t cb, void *data) {
+  auto &handlers = obj->handlers;
+  handlers.erase(std::remove_if(handlers.begin(), handlers.end(), [&](const auto &h) {
+    return h.callback == cb && h.data == data;
+  }), handlers.end());
+}
+inline void test_send_event(lv_obj_t *obj, int code) {
+  const auto handlers = obj->handlers;
+  for (const auto &h : handlers) {
+    if (h.code != code) continue;
+    lv_event_t event{obj, h.data};
+    h.callback(&event);
+  }
+}
+inline void lv_obj_move_foreground(lv_obj_t *obj) {
+  if (!obj->parent) return;
+  auto &children = obj->parent->children;
+  auto it = std::find(children.begin(), children.end(), obj);
+  if (it == children.end() || it + 1 == children.end()) return;
+  children.erase(it);
+  children.push_back(obj);
+  test_send_event(obj->parent, LV_EVENT_CHILD_CHANGED);
+}
 inline void lv_obj_move_background(lv_obj_t *) { lv_obj_move_background_calls++; }
 
 #include "temperature_unit.h"
@@ -204,6 +259,8 @@ int main() {
   assert(row_span == 1 && col_span == 3);
   grid_token_spans('p', row_span, col_span);
   assert(row_span == 4 && col_span == 3);
+  grid_token_spans('l', row_span, col_span);
+  assert(row_span == 3 && col_span == 4);
   grid_token_spans('q', row_span, col_span);
   assert(row_span == 3 && col_span == 3);
   grid_token_spans('h', row_span, col_span);
@@ -213,6 +270,8 @@ int main() {
   assert(grid_token_has_span_suffix('q'));
   assert(grid_token_has_span_suffix('h'));
   assert(grid_token_has_span_suffix('v'));
+  assert(grid_token_has_span_suffix('p'));
+  assert(grid_token_has_span_suffix('l'));
 
   assert(clock_bar_equal_fr_track_size(434, 3, 0) == 145);
   assert(clock_bar_equal_fr_track_size(434, 3, 1) == 145);
@@ -240,6 +299,11 @@ int main() {
     true, &main_page, espcontrol::DisplayMode::ACTIVE, false);
   assert(awake_clock_bar.reserve_space);
   assert(awake_clock_bar.visible);
+
+  auto dimmed_clock_bar = clock_bar_resolve_visibility(
+    true, &main_page, espcontrol::DisplayMode::DIMMED, false);
+  assert(dimmed_clock_bar.reserve_space);
+  assert(dimmed_clock_bar.visible);
 
   auto clock_screensaver_clock_bar = clock_bar_resolve_visibility(
     true, &main_page, espcontrol::DisplayMode::CLOCK, false);
@@ -275,13 +339,97 @@ int main() {
     &network_status_button,
     true, true, true,
     12, 17, 20, 10, 80);
-  assert(lv_obj_move_background_calls == 3);
+  assert(lv_obj_move_background_calls == 2);
+  assert(lv_obj_get_width(&temperature_1) == 72);
+  set_clock_bar_temperature_labels(temperature_labels, 1);
+  // Match clock_bar_apply: refresh values and visibility before opening a title.
+  clock_bar_temperature_values()[0] = 21.0f;
+  refresh_clock_bar_temperature_label_values(
+    &main_page, awake_clock_bar.visible, false, true, NAN, 21.0f);
+  set_clock_bar_subpage_label("Settings");
+  assert(temperature_1.text == "Settings");
+  assert(!lv_obj_has_flag(&temperature_1, LV_OBJ_FLAG_HIDDEN));
+  assert(lv_obj_get_width(&temperature_1) == 180);
+  set_clock_bar_subpage_label("");
+  assert(temperature_1.text == "21°");
+  assert(!lv_obj_has_flag(&temperature_1, LV_OBJ_FLAG_HIDDEN));
+  assert(lv_obj_get_width(&temperature_1) == 72);
   hide_clock_bar_top_layer_widgets(
     temperature_labels, 1, &display_time, &network_status_button);
   assert(lv_obj_has_flag(&temperature_1, LV_OBJ_FLAG_HIDDEN));
   assert(lv_obj_has_flag(&display_time, LV_OBJ_FLAG_HIDDEN));
   assert(lv_obj_has_flag(&network_status_button, LV_OBJ_FLAG_HIDDEN));
   set_clock_bar_temperature_value_count(0);
+
+  // Settings remains above modal and nested overlays, even when a modal
+  // explicitly moves itself to the foreground after creation.
+  lv_obj_t top_layer;
+  lv_obj_t modal;
+  lv_obj_t nested_modal;
+  network_status_button.parent = &top_layer;
+  modal.parent = &top_layer;
+  nested_modal.parent = &top_layer;
+  top_layer.children = {&network_status_button};
+  lv_obj_clear_flag(&network_status_button, LV_OBJ_FLAG_HIDDEN);
+  clock_bar_enable_settings_access(&network_status_button);
+  top_layer.children.push_back(&modal);
+  test_send_event(&top_layer, LV_EVENT_CHILD_CHANGED);
+  assert(top_layer.children.back() == &network_status_button);
+  lv_obj_move_foreground(&modal);
+  assert(top_layer.children.back() == &network_status_button);
+  top_layer.children.push_back(&nested_modal);
+  test_send_event(&top_layer, LV_EVENT_CHILD_CHANGED);
+  assert(top_layer.children.back() == &network_status_button);
+
+  // A hidden clock bar is never brought back by opening a modal.
+  lv_obj_add_flag(&network_status_button, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(&nested_modal);
+  assert(top_layer.children.back() == &nested_modal);
+  assert(lv_obj_has_flag(&network_status_button, LV_OBJ_FLAG_HIDDEN));
+  lv_obj_clear_flag(&network_status_button, LV_OBJ_FLAG_HIDDEN);
+  clock_bar_raise_settings_button(&network_status_button);
+  assert(top_layer.children.back() == &network_status_button);
+
+  // Deleting/recreating the button does not leave a dangling layer callback.
+  test_send_event(&network_status_button, LV_EVENT_DELETE);
+  top_layer.children.pop_back();
+  assert(top_layer.handlers.empty());
+  test_send_event(&top_layer, LV_EVENT_CHILD_CHANGED);
+  network_status_button.parent = nullptr;
+
+  // Right-side icons pack leftwards by glyph edges, so each visible icon sits
+  // one gap from its neighbour regardless of the surrounding tap-target width.
+  auto right_icons = clock_bar_right_icons_begin(4, 8);
+  assert(!right_icons.has_glyph);
+  clock_bar_right_icons_seed(right_icons, 48, 26);
+  assert(right_icons.has_glyph);
+  assert(right_icons.cursor == 41);
+  // Box right edge sits 11px inside the glyph it centres, so -38 puts the glyph
+  // exactly 8px left of the network glyph.
+  assert(clock_bar_right_icons_next_x(right_icons, 48, 26) == -38);
+  assert(right_icons.cursor == 75);
+  // A second icon packs against the first rather than skipping a slot.
+  assert(clock_bar_right_icons_next_x(right_icons, 48, 26) == -72);
+  // With no network anchor, the first visible optional icon takes the normal
+  // rightmost position and the next icon packs against it.
+  auto no_network_icons = clock_bar_right_icons_begin(4, 8);
+  assert(!no_network_icons.has_glyph);
+  assert(no_network_icons.cursor == 0);
+  assert(clock_bar_right_icons_next_x(no_network_icons, 48, 26) == -4);
+  assert(no_network_icons.has_glyph);
+  assert(no_network_icons.cursor == 41);
+  assert(clock_bar_right_icons_next_x(no_network_icons, 48, 26) == -38);
+  // Hidden optional icons do not call next_x and therefore consume no space.
+  auto hidden_optional_icons = clock_bar_right_icons_begin(6, 8);
+  assert(!hidden_optional_icons.has_glyph);
+  assert(hidden_optional_icons.cursor == 0);
+  // A glyph as wide as its box needs no lead.
+  auto flush_icons = clock_bar_right_icons_begin(8, 6);
+  clock_bar_right_icons_seed(flush_icons, 40, 40);
+  assert(flush_icons.cursor == 48);
+  assert(clock_bar_right_icons_next_x(flush_icons, 40, 40) == -54);
+  // A missing label falls back to the tap-target width rather than crowding.
+  assert(clock_bar_glyph_width(nullptr, 38) == 38);
 
   assert(cfg_field("light.kitchen;Kitchen;Auto;Lightbulb", 0) == "light.kitchen");
   assert(cfg_field("light.kitchen;Kitchen;Auto;Lightbulb", 3) == "Lightbulb");
@@ -308,6 +456,55 @@ int main() {
   assert(sensor_state_display_text(state_labels, "medium-high") == "Medium-High");
   assert(text_sensor_display_text("pre-wash") == "Pre-Wash");
   assert(text_sensor_display_text("pre_wash") == "Pre Wash");
+  assert(text_sensor_display_text(u8"Übermorgen: Müll") == u8"Übermorgen: Müll");
+  assert(text_sensor_display_text(u8"ätest ötest ütest ætest") == u8"Ätest Ötest Ütest Ætest");
+  assert(text_sensor_display_text(u8"öätest") == u8"Öätest");
+  assert(text_sensor_display_text(u8"ÜBERMORGEN") == u8"Übermorgen");
+  assert(text_sensor_display_text(u8"čESKÝ") == u8"Český");
+  assert(text_sensor_display_text(u8"ßtest ÿtest") == u8"ßtest ÿtest");
+  assert(text_sensor_display_text(u8"Приветtest") == u8"Приветtest");
+  assert(text_sensor_display_text(u8"—test") == u8"—Test");
+  assert(text_sensor_display_text(u8"abä", 3) == "Ab");
+  assert(text_sensor_display_text("first_line\r\nsecond-line") == "First Line\nSecond-Line");
+  assert(sentence_cap_text(u8"über_status-test") == u8"Über Status Test");
+  assert(sentence_cap_text(u8"Приветtest") == u8"Приветtest");
+  assert(sentence_cap_text(u8"—test") == u8"—Test");
+  for (auto formatter : {+[](const std::string &s) { return text_sensor_display_text(s.c_str()); },
+                         +[](const std::string &s) { return sentence_cap_text(s); }}) {
+    assert(formatter("").empty());
+    assert(formatter(u8"Übermorgen: Müll") == u8"Übermorgen: Müll");
+    assert(formatter(u8"ätest ötest ütest ætest") == u8"Ätest Ötest Ütest Ætest");
+    assert(formatter(u8"öätest ÜBERMORGEN čESKÝ") == u8"Öätest Übermorgen Český");
+    assert(formatter(u8"ṣTEST ṢTEST") == u8"Ṣtest Ṣtest");
+    assert(formatter(u8"İTEST ıTEST iTEST ITEST") == u8"İtest ıtest Itest Itest");
+    assert(formatter(u8"ßtest ÿtest Приветtest Ελληνικάtest שלוםtest") ==
+           u8"ßtest ÿtest Приветtest Ελληνικάtest שלוםtest");
+    assert(formatter(u8"—test 😀test") == u8"—Test 😀Test");
+    // Script punctuation, symbols and combining marks must not consume the first letter.
+    for (const std::string prefix : {u8"\u037E", u8"\u0387", u8"\u0384", u8"\u03F6",
+                                     u8"\u0482", u8"\u0483", u8"\u05BE", u8"\u05C3",
+                                     u8"\u05F3", u8"\u05B0"}) {
+      assert(formatter(prefix + "test") == prefix + "Test");
+      assert(formatter("a" + prefix + "TEST") == "A" + prefix + "test");
+    }
+    assert(formatter(u8"\u037Ftest \u03F7test \u0481test \u048Atest \u05EFtest") ==
+           u8"\u037Ftest \u03F7test \u0481test \u048Atest \u05EFtest");
+    assert(formatter(std::string("\xFF") + "test") == std::string("\xFF") + "Test");
+    assert(formatter(std::string("\xE2") + "x") == std::string("\xE2") + "X");
+    assert(formatter(std::string("\xC0\xAF") + "test") == std::string("\xC0\xAF") + "Test");
+    assert(formatter(std::string("\xED\xA0\x80") + "test") == std::string("\xED\xA0\x80") + "Test");
+    assert(formatter(std::string("\xF4\x90\x80\x80") + "test") == std::string("\xF4\x90\x80\x80") + "Test");
+    assert(formatter(std::string("ab\xE2\x82")) == "Ab");
+  }
+  assert(text_sensor_display_text(" \r\nfirst__line\n\nsecond-line \r\n") == "First Line\nSecond-Line");
+  assert(sentence_cap_text(" \r\nfirst__line\n\nsecond-line \r\n") == "First Line Second Line");
+  for (const std::string s : {u8"ä", u8"Ṣ", u8"😀"}) {
+    for (size_t limit = 1; limit < s.size(); limit++) {
+      assert(text_sensor_display_text(s.c_str(), limit).empty());
+      assert(text_sensor_display_text(("ab" + s).c_str(), 2 + limit) == "Ab");
+    }
+    assert(text_sensor_display_text(s.c_str(), s.size()) == (s == u8"ä" ? u8"Ä" : s));
+  }
   auto legacy_state_labels = parse_cfg(";;;;sensor.bin_level;;sensor;text;state_labels,state_high_label=Please%20empty");
   assert(legacy_state_labels.options == "state_labels,state_input=high,state_output=Please empty");
   auto numeric_state_labels = parse_cfg(";;;;sensor.bin_level;;sensor;0;state_labels,state_high_label=Please%20empty");
@@ -386,9 +583,9 @@ int main() {
   auto image_bad_modal = parse_cfg("camera.front_door;;Auto;Auto;;;image;;image_modal_mode=stretch,image_refresh=30");
   assert(image_bad_modal.options == "");
   assert(!image_card_modal_fit_enabled(image_bad_modal));
-  auto image_ignored_label = parse_cfg("camera.front_door;Front Door;Auto;Auto;;;image;;");
-  assert(image_ignored_label.label == "");
-  assert(!image_card_label_enabled(image_ignored_label));
+  auto image_hidden_label_name = parse_cfg("camera.front_door;Front Door;Auto;Auto;;;image;;");
+  assert(image_hidden_label_name.label == "Front Door");
+  assert(!image_card_label_enabled(image_hidden_label_name));
   auto image_refresh = parse_cfg("~camera.front_door,,Auto,Auto,,,image,,image_refresh=30%2Cimage_refresh_mode=timer");
   assert(image_refresh.type == "image");
   assert(image_refresh.options == "");
@@ -471,11 +668,14 @@ int main() {
   assert(cover_art.precision == "");
   assert(cover_art.options == "");
   assert(media_cover_art_enabled(cover_art));
-  auto cover_art_details = parse_cfg("media_player.office;Cover Art;Auto;Auto;cover_art;;media;;cover_art_action=control_modal,cover_art_details");
+  auto cover_art_details = parse_cfg("media_player.office;Cover Art;Auto;Auto;cover_art;;media;;cover_art_action=play_pause,cover_art_details");
   assert(media_cover_art_enabled(cover_art_details));
   assert(media_cover_art_details_enabled(cover_art_details));
-  assert(media_cover_art_press_action(cover_art_details) == "control_modal");
-  assert(cover_art_details.options == "cover_art_action=control_modal,cover_art_details");
+  assert(cover_art_details.options == "cover_art_details");
+  auto cover_art_advanced = parse_cfg("media_player.office;Cover Art;Auto;Auto;cover_art;;media;;speaker_group_entity=sensor.cover_art_speakers,volume_max=75");
+  assert(cover_art_advanced.options == "speaker_group_entity=sensor.cover_art_speakers,volume_max=75");
+  assert(media_speaker_group_entity(cover_art_advanced) == "sensor.cover_art_speakers");
+  assert(media_volume_max_percent(cover_art_advanced) == 75);
   auto legacy_cover_art = parse_cfg("media_player.office;Now Playing;Auto;Auto;now_playing;;media;progress;media_cover_art");
   assert(legacy_cover_art.sensor == "cover_art");
   assert(legacy_cover_art.precision == "");
@@ -569,32 +769,6 @@ int main() {
   auto subpage_bad_kind = parse_cfg("media_player.bad;Bad;Speaker;Auto;indicator;;subpage;;subpage_kind=audio");
   assert(subpage_bad_kind.options == "");
 
-  auto todo = parse_cfg("todo.shopping;Shopping;Check;Auto;;;todo");
-  assert(todo.entity == "todo.shopping");
-  assert(todo.label == "Shopping");
-  assert(todo.icon == "Check");
-  assert(todo.icon_on == "Auto");
-  assert(todo.type == "todo");
-  assert(todo.options == "");
-  assert(todo_card_show_count(todo));
-  auto todo_icon_display = parse_cfg("todo.shopping;Shopping;Check;Auto;;;todo;;count_display=icon");
-  assert(todo_icon_display.options == "count_display=icon");
-  assert(!todo_card_show_count(todo_icon_display));
-  assert(!card_large_numbers_supported(todo_icon_display));
-  auto todo_large = parse_cfg("todo.shopping;Shopping;Check;Auto;;;todo;;large_numbers");
-  assert(todo_large.options == "large_numbers");
-  assert(todo_card_show_count(todo_large));
-  assert(card_large_numbers_enabled(todo_large));
-  auto todo_icon_large = parse_cfg("todo.shopping;Shopping;Check;Auto;;;todo;;count_display=icon,large_numbers");
-  assert(todo_icon_large.options == "count_display=icon");
-  assert(!card_large_numbers_enabled(todo_icon_large));
-  auto todo_legacy_options = parse_cfg("todo.shopping;Shopping;Check;Auto;;;todo;;count_display=top_task,label_display=count,completed_display=hide,large_numbers");
-  assert(todo_legacy_options.options == "large_numbers");
-  assert(todo_card_show_count(todo_legacy_options));
-  assert(!todo_card_shows_top_task(todo_legacy_options));
-  assert(!todo_card_label_shows_count(todo_legacy_options));
-  assert(!todo_card_shows_completed_items(todo_legacy_options));
-  assert(card_large_numbers_enabled(todo_legacy_options));
 
   assert(cfg_option_token_present("large_numbers,active_color", "active_color"));
   assert(cfg_option_value("state_entity=sensor.room%2Ctemp,state_unit=%25", "state_entity") == "sensor.room,temp");
@@ -605,8 +779,12 @@ int main() {
   assert(parse_hex_color("BAD", valid) == 0 && !valid);
   assert(!ha_entity_state_unavailable_ref("button.test", "unknown"));
   assert(!ha_entity_state_unavailable_ref("input_button.test", "unknown"));
+  assert(!ha_entity_state_unavailable_ref("select.test", "unknown"));
+  assert(!ha_entity_state_unavailable_ref("input_select.test", "unknown"));
   assert(ha_entity_state_unavailable_ref("button.test", "unavailable"));
   assert(ha_entity_state_unavailable_ref("button.test", ""));
+  assert(ha_entity_state_unavailable_ref("select.test", "unavailable"));
+  assert(ha_entity_state_unavailable_ref("input_select.test", ""));
   assert(ha_entity_state_unavailable_ref("sensor.test", "unknown"));
   assert(ha_entity_state_unavailable_ref("light.test", "unknown"));
   assert(is_entity_on_ref("playing"));
@@ -614,6 +792,30 @@ int main() {
   assert(normalize_width_compensation_percent(25) == 50);
   assert(normalize_width_compensation_percent(175) == 150);
   assert(width_compensation_scale(100) == 256);
+  lv_obj_t compensated_obj;
+  set_width_compensation_vertical_axis(false);
+  apply_width_compensation(&compensated_obj, 95);
+  assert(compensated_obj.transform_scale_x == width_compensation_scale(95));
+  assert(compensated_obj.transform_scale_y == 256);
+  set_icon_width_compensation_percent(95);
+  apply_icon_width_compensation(&compensated_obj, 180);
+  assert(compensated_obj.transform_scale_x == 171);
+  assert(compensated_obj.transform_scale_y == 180);
+  set_text_width_compensation_percent(100);
+  apply_text_width_compensation(&compensated_obj);
+  assert(compensated_obj.transform_scale_x == 256);
+  assert(compensated_obj.transform_scale_y == 256);
+  set_width_compensation_vertical_axis(true);
+  apply_width_compensation(&compensated_obj, 95);
+  assert(compensated_obj.transform_scale_x == 256);
+  assert(compensated_obj.transform_scale_y == width_compensation_scale(95));
+  apply_icon_width_compensation(&compensated_obj, 180);
+  assert(compensated_obj.transform_scale_x == 180);
+  assert(compensated_obj.transform_scale_y == 171);
+  apply_text_width_compensation(&compensated_obj);
+  assert(compensated_obj.transform_scale_x == 256);
+  assert(compensated_obj.transform_scale_y == 256);
+  set_width_compensation_vertical_axis(false);
   assert(clamp_percent_value(-1) == 0);
   assert(clamp_percent_value(101) == 100);
   int brightness_pct = -1;
@@ -631,6 +833,18 @@ int main() {
   int rise_m = 0;
   int set_h = 0;
   int set_m = 0;
+  assert(normalize_brightness_mode("Manual") == "Manual");
+  assert(normalize_brightness_mode("fixed_times") == "Fixed times");
+  assert(normalize_brightness_mode("unexpected") == "Sunrise and sunset");
+  assert(brightness_mode_manual("Manual"));
+  assert(!brightness_mode_manual("Fixed times"));
+  assert(brightness_mode_uses_fixed_times("Fixed times"));
+  assert(brightness_mode_uses_sun("Sunrise and sunset"));
+  assert(brightness_schedule_times("Sunrise and sunset", true, 7, 15, 20, 45, "06:00", "18:00", rise_h, rise_m, set_h, set_m));
+  assert(rise_h == 7 && rise_m == 15 && set_h == 20 && set_m == 45);
+  assert(brightness_schedule_times("Fixed times", true, 7, 15, 20, 45, "06:30", "21:05", rise_h, rise_m, set_h, set_m));
+  assert(rise_h == 6 && rise_m == 30 && set_h == 21 && set_m == 5);
+  assert(!brightness_schedule_times("Manual", true, 7, 15, 20, 45, "06:30", "21:05", rise_h, rise_m, set_h, set_m));
   assert(brightness_schedule_times(true, true, 7, 15, 20, 45, "06:00", "18:00", rise_h, rise_m, set_h, set_m));
   assert(rise_h == 7 && rise_m == 15 && set_h == 20 && set_m == 45);
   assert(brightness_schedule_times(false, true, 7, 15, 20, 45, "06:30", "21:05", rise_h, rise_m, set_h, set_m));
@@ -645,7 +859,7 @@ int main() {
   assert(rise_h == 6 && rise_m == 0 && set_h == 18 && set_m == 0);
 
   OrderResult parsed;
-  parse_order_string("1,2d,3w,4b,5t,6x,7h,8v,99", 9, parsed);
+  parse_order_string("1,2d,3w,4b,5t,6x,7h,8v,9l,10u,99", 11, parsed);
   assert(parsed.positions[0] == 1);
   assert(parsed.positions[1] == 2);
   assert(parsed.row_span[1] == 2 && parsed.col_span[1] == 1);
@@ -655,6 +869,8 @@ int main() {
   assert(parsed.row_span[5] == 1 && parsed.col_span[5] == 3);
   assert(parsed.row_span[6] == 2 && parsed.col_span[6] == 3);
   assert(parsed.row_span[7] == 3 && parsed.col_span[7] == 2);
+  assert(parsed.row_span[8] == 3 && parsed.col_span[8] == 4);
+  assert(parsed.row_span[9] == 1 && parsed.col_span[9] == 5);
 
   OrderResult overlap;
   parse_order_string("1b,2,3,4,5,6", 9, overlap);
@@ -663,6 +879,33 @@ int main() {
   assert(cleared.positions[1] == 0);
   assert(cleared.positions[3] == 0);
   assert(cleared.positions[4] == 0);
+
+  // A 10-inch portrait-large tile must not retain its 4x3 span when restored
+  // onto the 7-inch 5x3 grid from the reported backup layout.
+  OrderResult cross_device;
+  parse_order_string("1,7,6p,,,8,2,,,,3,4,,,,9,5", 15, cross_device);
+  OrderResult cross_device_safe;
+  clear_spanned_cells(cross_device, 15, 5, cross_device_safe);
+  assert(cross_device_safe.positions[2] == 6);
+  assert(cross_device_safe.row_span[5] == 1);
+  assert(cross_device_safe.col_span[5] == 1);
+
+  // Spans that fit the target grid remain unchanged.
+  OrderResult fitting_span;
+  parse_order_string("1,2w", 6, fitting_span);
+  OrderResult fitting_span_safe;
+  clear_spanned_cells(fitting_span, 6, 3, fitting_span_safe);
+  assert(fitting_span_safe.row_span[1] == 1);
+  assert(fitting_span_safe.col_span[1] == 2);
+
+  // Legacy subpages reserve the first cell for Back. A wide card at source
+  // position 4 is rendered at position 5, where it fits a five-column grid.
+  int subpage_row_span = 1;
+  int subpage_col_span = 2;
+  normalize_grid_span_for_position(5, 15, 5, subpage_row_span,
+                                   subpage_col_span);
+  assert(subpage_row_span == 1);
+  assert(subpage_col_span == 2);
 
   return 0;
 }
@@ -744,7 +987,7 @@ def runtime_capability_enum_name(value: str) -> str:
 
 
 def generated_card_runtime_assertions() -> str:
-    contract = json.loads((ROOT / "common" / "config" / "card_contract.json").read_text(encoding="utf-8"))
+    contract = json.loads((ROOT / "product" / "v2" / "card_contract.json").read_text(encoding="utf-8"))
     runtime = contract["runtime"]
     lines = [
         "  struct RuntimeConfig {",
@@ -844,10 +1087,14 @@ def main() -> int:
         shutil.copy2(SAVED_CONFIG_SWITCH_HEADER, tmp_path / "button_grid_saved_config_switch_generated.h")
         shutil.copy2(CLOCK_BAR_HEADER, tmp_path / "clock_bar.h")
         shutil.copy2(BACKLIGHT_HEADER, tmp_path / "backlight.h")
+        shutil.copy2(BACKLIGHT_HEADER.with_name("photo_metadata.h"), tmp_path / "photo_metadata.h")
+        shutil.copy2(BACKLIGHT_FADE_HEADER, tmp_path / "backlight_fade.h")
         shutil.copy2(DISPLAY_MODE_CONTROLLER_HEADER, tmp_path / "display_mode_controller.h")
         shutil.copy2(LAYOUT_HEADER, tmp_path / "button_grid_layout.h")
         shutil.copy2(LIMITS_HEADER, tmp_path / "button_grid_limits.h")
         shutil.copy2(STRING_HEADER, tmp_path / "button_grid_string.h")
+        shutil.copy2(STRING_HEADER.parent / "camera_refresh_policy.h", tmp_path / "camera_refresh_policy.h")
+        shutil.copy2(DISPLAY_TEXT_HEADER, tmp_path / "display_text.h")
         lvgl_stub = tmp_path / "esphome" / "components" / "lvgl" / "lvgl_esphome.h"
         lvgl_stub.parent.mkdir(parents=True, exist_ok=True)
         lvgl_stub.write_text("", encoding="utf-8")
@@ -883,6 +1130,7 @@ def main() -> int:
         subprocess.run([cxx, "-std=c++17", "-Wall", "-Wextra", str(source), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
     print("Firmware parser checks passed.")
+    subprocess.run([sys.executable, str(ROOT / "scripts" / "check_firmware_media_group.py")], check=True)
     return 0
 
 

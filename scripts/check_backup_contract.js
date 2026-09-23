@@ -9,7 +9,7 @@ const { loadBuiltWebSource } = require("./web_source");
 
 const ROOT = path.resolve(__dirname, "..");
 const SOURCE = path.join(ROOT, "src", "webserver", "entry.ts");
-const COMPAT_FIXTURES = path.join(ROOT, "compatibility", "fixtures", "product_compatibility.json");
+const COMPAT_FIXTURES = path.join(ROOT, "product", "v2", "product_compatibility.json");
 
 function loadHooks(search = "") {
   const params = new URLSearchParams(search);
@@ -88,12 +88,13 @@ const v2 = hooks.createBackupConfig({
     timezone: "Europe/London (GMT+0)",
     clock_bar: true,
     cover_art_hide_external_input: true,
+    home_assistant_artwork_endpoint_mode: "Manual",
     home_assistant_artwork_protocol: "https",
     home_assistant_artwork_port: 80,
     firmware_auto_update: false,
     firmware_update_frequency: "Weekly",
   },
-  screen: { brightness_day: 80, schedule_mode: "clock" },
+  screen: { brightness_day: 80, schedule_mode: "clock", schedule_sensor_entity: "binary_sensor.schedule" },
 });
 
 assert.strictEqual(v2.version, 2, "exports v2 backups");
@@ -120,10 +121,26 @@ assert.deepStrictEqual(plain(v2.subpage_objects["1"]), {
 assert.strictEqual(v2.buttons[1].type, "weather", "exports canonical card types");
 assert.strictEqual(v2.buttons[1].precision, "tomorrow", "exports migrated card details");
 assert.strictEqual(v2.settings.cover_art_hide_external_input, true, "exports cover art external-input setting");
+assert.strictEqual(v2.settings.home_assistant_artwork_endpoint_mode, "Manual", "exports Home Assistant artwork endpoint mode");
 assert.strictEqual(v2.settings.home_assistant_artwork_protocol, "https", "exports Home Assistant artwork protocol setting");
 assert.strictEqual(v2.settings.home_assistant_artwork_port, 80, "exports Home Assistant artwork port setting");
 assert.strictEqual(v2.settings.firmware_auto_update, false, "exports firmware auto-update setting");
 assert.strictEqual(v2.settings.firmware_update_frequency, "Weekly", "exports firmware update frequency setting");
+assert.strictEqual(v2.screen.schedule_sensor_entity, "binary_sensor.schedule", "exports the dedicated schedule sensor setting");
+
+for (const options of [
+  "image_modal_refresh_mode=periodic,image_modal_refresh_interval=5",
+  "image_modal_refresh_mode=activity,image_modal_refresh_trigger=event.doorbell",
+]) {
+  const card = { type: "image", entity: "camera.front_door", options };
+  const backup = hooks.createBackupConfig({
+    device: "panel-a", slots: 2, grid: [1, 2], buttons: [card, { type: "subpage" }],
+    subpages: { 2: { order: ["1", "B"], buttons: [card] } },
+  });
+  const restored = hooks.normalizeBackupConfig(backup);
+  assert.strictEqual(restored.buttons[0].options, options, "camera refresh survives main-card backup");
+  assert.strictEqual(restored.subpage_objects[2].buttons[0].options, options, "camera refresh survives subpage backup");
+}
 
 const playlistButton = {
   entity: "media_player.kitchen",
@@ -289,22 +306,19 @@ assert.strictEqual(
   "structured subpage cross-device import keeps readable object content"
 );
 
-const unsupportedImageBackup = {
+const supportedImageBackup = {
   version: 2,
   format: hooks.BACKUP_FORMAT,
   device: "panel-a",
   button_order: "1",
   buttons: [{ type: "image", entity: "camera.front_door", label: "Front Door" }],
 };
-throwsBackupMessage(
-  () => s3Hooks.planBackupImport(unsupportedImageBackup, {
-    device: "guition-esp32-s3-4848s040",
-    slots: 9,
-  }),
-  "This controller does not support the image card type in this backup."
-);
-throwsBackupMessage(
-  () => s3Hooks.planBackupImport({
+const supportedImagePlan = s3Hooks.planBackupImport(supportedImageBackup, {
+  device: "guition-esp32-s3-4848s040",
+  slots: 9,
+});
+assert.strictEqual(supportedImagePlan.buttons[0].type, "image", "S3 backup import accepts Camera Cards");
+const supportedImageSubpagePlan = s3Hooks.planBackupImport({
     version: 2,
     format: hooks.BACKUP_FORMAT,
     device: "panel-a",
@@ -320,8 +334,11 @@ throwsBackupMessage(
   }, {
     device: "guition-esp32-s3-4848s040",
     slots: 9,
-  }),
-  "This controller does not support the image card type in this backup."
+  });
+assert.strictEqual(
+  supportedImageSubpagePlan.subpages["1"].buttons[0].type,
+  "image",
+  "S3 backup import accepts Camera Cards inside subpages",
 );
 
 throwsBackupMessage(

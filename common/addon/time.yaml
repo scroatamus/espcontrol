@@ -18,12 +18,8 @@ esphome:
       - lambda: |-
           id(clock_format_12h) = id(clock_format_select).current_option() == "12h";
           std::string timezone_option = id(timezone_select).current_option();
-          const char *posix = apply_configured_timezone(timezone_option);
+          apply_configured_timezone(timezone_option);
           set_espcontrol_language(id(language_select).current_option());
-          if (posix != nullptr) {
-            id(panel_time).set_timezone(posix);
-            id(homeassistant_time).set_timezone(posix);
-          }
           set_display_temperature_unit(id(temperature_unit_select).current_option(),
                                        timezone_option);
           id(screen_active_timezone_sensor).publish_state(effective_timezone_option(timezone_option));
@@ -31,19 +27,11 @@ esphome:
       - script.execute: ha_setup_text_refresh
       - script.execute: ha_actions_text_refresh
       - script.execute: button_setup_text_refresh
+      - script.execute: camera_screensaver_text_refresh
 
-# Ask Home Assistant for time once the native API has finished state setup. This
-# keeps the HA time source as a fallback without adding traffic during the
-# fragile reconnect window.
-api:
-  on_client_connected:
-    - delay: 2s
-    - lambda: |-
-        if (ha_api_state_connected()) id(homeassistant_time).update();
-    - script.execute: timezone_after_homeassistant_time_sync
-    - script.execute: backlight_recalc_sunrise_sunset
-    - script.execute: screen_schedule_check
-
+# Ask Home Assistant time is scheduled centrally by core_infra.yaml after the
+# native API handshake has completed.  Keeping it there prevents a second
+# connection hook from running work before the protocol Hello response.
 # ---------------------------------------------------------------------------
 # Timezone selector (drives sunrise/sunset calculation via sun_calc.h)
 # ---------------------------------------------------------------------------
@@ -197,10 +185,7 @@ select:
         - lambda: |-
             std::string timezone_option(x.c_str(), x.size());
             const char *posix = apply_configured_timezone(timezone_option);
-            if (posix != nullptr) {
-              id(panel_time).set_timezone(posix);
-              id(homeassistant_time).set_timezone(posix);
-            } else {
+            if (posix == nullptr) {
               if (ha_api_state_connected()) id(homeassistant_time).update();
             }
             set_display_temperature_unit(id(temperature_unit_select).current_option(),
@@ -258,6 +243,7 @@ select:
       - "es"
       - "fi"
       - "fr"
+      - "he"
       - "hu"
       - "it"
       - "nb"
@@ -266,6 +252,7 @@ select:
       - "pt"
       - "pt-br"
       - "ro"
+      - "ru"
       - "sk"
       - "sl"
       - "sv"
@@ -282,6 +269,7 @@ select:
         - script.execute: ha_setup_text_refresh
         - script.execute: ha_actions_text_refresh
         - script.execute: button_setup_text_refresh
+        - script.execute: camera_screensaver_text_refresh
         - script.execute: refresh_button_grid
         - script.execute: network_status_refresh
 
@@ -435,10 +423,6 @@ script:
       - lambda: |-
           std::string timezone_option = id(timezone_select).current_option();
           const char *posix = apply_configured_timezone(timezone_option);
-          if (posix != nullptr) {
-            id(panel_time).set_timezone(posix);
-            id(homeassistant_time).set_timezone(posix);
-          }
           set_display_temperature_unit(id(temperature_unit_select).current_option(),
                                        timezone_option);
           std::string active_timezone = effective_timezone_option(timezone_option);
@@ -478,7 +462,7 @@ script:
                                             id(homeassistant_time).now());
           bool use_12h = id(clock_format_12h);
           if (now.is_valid()) {
-            static char date_buf[11];
+            static char date_buf[16];
             snprintf(date_buf, sizeof(date_buf), "%04d-%02d-%02d",
                      now.year, now.month, now.day_of_month);
             id(screen_date_sensor).publish_state(date_buf);

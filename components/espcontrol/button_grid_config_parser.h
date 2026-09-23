@@ -12,6 +12,7 @@
 
 #include "button_grid_card_runtime.h"
 #include "button_grid_string.h"
+#include "camera_refresh_policy.h"
 #include "button_grid_saved_config_action_generated.h"
 #include "button_grid_saved_config_access_generated.h"
 #include "button_grid_saved_config_security_generated.h"
@@ -43,7 +44,6 @@ constexpr const char *IMAGE_LABEL_OPTION = card_runtime_option_name_image_label(
 constexpr const char *IMAGE_ICON_OPTION = card_runtime_option_name_image_icon();
 constexpr const char *IMAGE_MODAL_MODE_OPTION = card_runtime_option_name_image_modal_mode();
 constexpr const char *MEDIA_COVER_ART_OPTION = card_runtime_option_name_media_cover_art();
-constexpr const char *MEDIA_COVER_ART_ACTION_OPTION = card_runtime_option_name_cover_art_action();
 constexpr const char *MEDIA_COVER_ART_DETAILS_OPTION = card_runtime_option_name_cover_art_details();
 constexpr const char *MEDIA_COVER_ART_SECONDARY_ENTITY_OPTION = card_runtime_option_name_cover_art_secondary_entity();
 constexpr const char *LIGHT_CONTROL_TABS_OPTION = card_runtime_option_name_light_tabs();
@@ -51,12 +51,14 @@ constexpr const char *LIGHT_CONTROL_DEFAULT_TABS_VALUE = "power|brightness|tempe
 constexpr const char *COVER_CONTROL_TABS_OPTION = card_runtime_option_name_cover_tabs();
 constexpr const char *CLIMATE_CONTROL_TABS_OPTION = "climate_tabs";
 constexpr const char *CLIMATE_CONTROL_DEFAULT_TABS_VALUE = "temperature|mode|preset|fan|swing";
-constexpr const char *FAN_CONTROL_TABS_OPTION = "fan_tabs";
+constexpr const char *FAN_CONTROL_TABS_OPTION = card_runtime_option_name_fan_tabs();
+constexpr const char *FAN_LIGHT_ENTITY_OPTION = card_runtime_option_name_fan_light_entity();
 constexpr const char *FAN_CONTROL_DEFAULT_TABS_VALUE = "power|speed|preset|oscillation|direction";
 constexpr const char *LABEL_DISPLAY_OPTION = card_runtime_option_name_label_display();
 constexpr const char *NUMBER_DISPLAY_OPTION = card_runtime_option_name_number_display();
 constexpr const char *TEMPERATURE_STEP_OPTION = card_runtime_option_name_temperature_step();
 constexpr const char *VOLUME_MAX_OPTION = card_runtime_option_name_volume_max();
+constexpr const char *MEDIA_SPEAKER_GROUP_ENTITY_OPTION = card_runtime_option_name_speaker_group_entity();
 constexpr const char *MEDIA_PLAYLIST_CONTENT_ID_OPTION = card_runtime_option_name_playlist_content_id();
 constexpr const char *MEDIA_PLAYLIST_CONTENT_TYPE_OPTION = card_runtime_option_name_playlist_content_type();
 constexpr const char *MEDIA_PLAYLIST_PLAYER_SOURCE_OPTION = card_runtime_option_name_playlist_player_source();
@@ -178,7 +180,7 @@ struct ParsedCfg {
   std::string icon_on;     // 3  icon name for on state (blank = no swap)
   std::string sensor;      // 4  sensor entity, cover mode, or action name for Action cards
   std::string unit;        // 5  unit suffix for sensor display
-  std::string type;        // 6  button type: "" (toggle), action, sensor, calendar, timezone, weather_forecast, slider, light_brightness, light_switch, fan_*, cover, garage, gate, lock, alarm, alarm_action, media, climate, push, webhook, todo, internal, subpage
+  std::string type;        // 6  button type: "" (toggle), action, sensor, calendar, timezone, weather_forecast, slider, light_brightness, light_switch, fan_*, cover, garage, gate, lock, alarm, alarm_action, media, climate, push, webhook, internal, subpage
   std::string precision;   // 7  decimal places for sensors; "text" = text sensor mode
   std::string options;     // 8  comma-delimited card options
 };
@@ -325,12 +327,35 @@ inline std::string media_card_options_normalized(const std::string &options,
                                                  const std::string &mode) {
   if (mode == "control_modal") {
     std::string out;
+    std::string speaker_group_entity = trim_saved_option_value(
+      cfg_option_value(options, MEDIA_SPEAKER_GROUP_ENTITY_OPTION));
+    if (!speaker_group_entity.empty()) {
+      out = std::string(MEDIA_SPEAKER_GROUP_ENTITY_OPTION) + "=" +
+        encode_compact_field(speaker_group_entity);
+    }
     if (cfg_option_value(options, "label_display") == "label") {
-      out = "label_display=label";
+      if (!out.empty()) out += ",";
+      out += "label_display=label";
     }
     if (cfg_option_value(options, "number_display") == "volume") {
       if (!out.empty()) out += ",";
       out += "number_display=volume";
+    }
+    int max_pct = normalize_media_volume_max_percent(
+      cfg_option_value(options, VOLUME_MAX_OPTION));
+    if (max_pct < card_runtime_media_volume_max_default()) {
+      if (!out.empty()) out += ",";
+      out += std::string(VOLUME_MAX_OPTION) + "=" + std::to_string(max_pct);
+    }
+    return out;
+  }
+  if (mode == "speaker_group") {
+    std::string out;
+    std::string speaker_group_entity = trim_saved_option_value(
+      cfg_option_value(options, MEDIA_SPEAKER_GROUP_ENTITY_OPTION));
+    if (!speaker_group_entity.empty()) {
+      out = std::string(MEDIA_SPEAKER_GROUP_ENTITY_OPTION) + "=" +
+        encode_compact_field(speaker_group_entity);
     }
     int max_pct = normalize_media_volume_max_percent(
       cfg_option_value(options, VOLUME_MAX_OPTION));
@@ -366,9 +391,6 @@ inline std::string media_card_options_normalized(const std::string &options,
   }
   if (mode == "cover_art") {
     std::string out;
-    if (cfg_option_value(options, MEDIA_COVER_ART_ACTION_OPTION) == "control_modal") {
-      out = std::string(MEDIA_COVER_ART_ACTION_OPTION) + "=control_modal";
-    }
     if (cfg_option_token_present(options, MEDIA_COVER_ART_DETAILS_OPTION)) {
       if (!out.empty()) out += ",";
       out += MEDIA_COVER_ART_DETAILS_OPTION;
@@ -379,6 +401,19 @@ inline std::string media_card_options_normalized(const std::string &options,
       if (!out.empty()) out += ",";
       out += std::string(MEDIA_COVER_ART_SECONDARY_ENTITY_OPTION) + "=" +
              encode_compact_field(secondary_entity);
+    }
+    std::string speaker_group_entity = trim_saved_option_value(
+      cfg_option_value(options, MEDIA_SPEAKER_GROUP_ENTITY_OPTION));
+    if (!speaker_group_entity.empty()) {
+      if (!out.empty()) out += ",";
+      out += std::string(MEDIA_SPEAKER_GROUP_ENTITY_OPTION) + "=" +
+             encode_compact_field(speaker_group_entity);
+    }
+    int max_pct = normalize_media_volume_max_percent(
+      cfg_option_value(options, VOLUME_MAX_OPTION));
+    if (max_pct < card_runtime_media_volume_max_default()) {
+      if (!out.empty()) out += ",";
+      out += std::string(VOLUME_MAX_OPTION) + "=" + std::to_string(max_pct);
     }
     return out;
   }
@@ -434,7 +469,8 @@ inline std::string normalize_image_modal_mode(const std::string &value) {
   return card_runtime_image_modal_mode(value);
 }
 
-inline std::string image_card_options_normalized(const std::string &options) {
+inline std::string image_card_options_normalized(const std::string &options,
+                                                 const std::string &entity = "") {
   std::string out;
   if (cfg_option_token_present(options, IMAGE_LABEL_OPTION)) {
     out = IMAGE_LABEL_OPTION;
@@ -448,6 +484,23 @@ inline std::string image_card_options_normalized(const std::string &options) {
   if (modal_mode != card_runtime_image_modal_mode_default()) {
     if (!out.empty()) out += ",";
     out += std::string(IMAGE_MODAL_MODE_OPTION) + "=" + modal_mode;
+  }
+  if (entity.empty() || entity.rfind("camera.", 0) == 0) {
+    const auto mode = espcontrol::camera::refresh_mode(cfg_option_value(options, "image_modal_refresh_mode"));
+    const std::string trigger = cfg_option_value(options, "image_modal_refresh_trigger");
+    auto append = [&out](const char *key, const std::string &value) {
+      if (!out.empty()) out += ",";
+      out += std::string(key) + "=" + value;
+    };
+    if (mode == espcontrol::camera::RefreshMode::PERIODIC) {
+      append("image_modal_refresh_mode", "periodic");
+      const uint32_t interval = espcontrol::camera::refresh_interval_ms(
+          cfg_option_value(options, "image_modal_refresh_interval"));
+      if (interval != 10000) append("image_modal_refresh_interval", std::to_string(interval / 1000));
+    } else if (mode == espcontrol::camera::RefreshMode::ACTIVITY && espcontrol::camera::valid_trigger(trigger)) {
+      append("image_modal_refresh_mode", "activity");
+      append("image_modal_refresh_trigger", trigger);
+    }
   }
   return out;
 }
@@ -540,7 +593,7 @@ inline std::string normalize_climate_control_tabs_value(const std::string &value
 
 inline bool fan_control_tab_token_valid(const std::string &value) {
   return value == "power" || value == "speed" || value == "preset" ||
-         value == "oscillation" || value == "direction";
+         value == "oscillation" || value == "direction" || value == "light";
 }
 
 inline std::string normalize_fan_control_tabs_value(const std::string &value) {
@@ -563,10 +616,33 @@ inline std::string normalize_fan_control_tabs_value(const std::string &value) {
 }
 
 inline std::string fan_control_card_options_normalized(const std::string &options) {
-  std::string tabs = normalize_fan_control_tabs_value(
-    cfg_option_value(options, FAN_CONTROL_TABS_OPTION));
-  if (tabs == FAN_CONTROL_DEFAULT_TABS_VALUE) return "";
-  return std::string(FAN_CONTROL_TABS_OPTION) + "=" + encode_compact_field(tabs);
+  std::string light_entity = cfg_option_value(options, FAN_LIGHT_ENTITY_OPTION);
+  std::string tabs_value = cfg_option_value(options, FAN_CONTROL_TABS_OPTION);
+  std::string tabs = normalize_fan_control_tabs_value(tabs_value);
+  if (light_entity.empty()) {
+    std::vector<std::string> filtered;
+    for (const auto &tab : split_config_fields(tabs, '|')) {
+      if (tab != "light") filtered.push_back(tab);
+    }
+    tabs.clear();
+    for (const auto &tab : filtered) {
+      if (!tabs.empty()) tabs += "|";
+      tabs += tab;
+    }
+    if (tabs.empty()) tabs = "power";
+  }
+  std::string default_tabs = FAN_CONTROL_DEFAULT_TABS_VALUE;
+  if (!light_entity.empty()) default_tabs += "|light";
+  if (tabs_value.empty()) tabs = default_tabs;
+  std::string out;
+  if (!light_entity.empty()) {
+    out = std::string(FAN_LIGHT_ENTITY_OPTION) + "=" + encode_compact_field(light_entity);
+  }
+  if (tabs != default_tabs) {
+    if (!out.empty()) out += ",";
+    out += std::string(FAN_CONTROL_TABS_OPTION) + "=" + encode_compact_field(tabs);
+  }
+  return out;
 }
 
 inline bool image_card_label_enabled(const ParsedCfg &p) {
@@ -577,6 +653,13 @@ inline bool image_card_icon_enabled(const ParsedCfg &p) {
   return cfg_option_token_present(p.options, IMAGE_ICON_OPTION);
 }
 
+inline void normalize_image_card_overlay_fields(std::string &icon,
+                                                const std::string &options) {
+  icon = cfg_option_token_present(options, IMAGE_ICON_OPTION)
+    ? (icon.empty() || icon == "Auto" ? "Camera" : icon)
+    : "Auto";
+}
+
 inline bool image_card_modal_fit_enabled(const ParsedCfg &p) {
   return normalize_image_modal_mode(
     cfg_option_value(p.options, IMAGE_MODAL_MODE_OPTION)) == "fit";
@@ -584,13 +667,6 @@ inline bool image_card_modal_fit_enabled(const ParsedCfg &p) {
 
 inline bool media_cover_art_enabled(const ParsedCfg &p) {
   return espcontrol::media::decode_config_v1(p).mode == espcontrol::media::Mode::COVER_ART;
-}
-
-inline std::string media_cover_art_press_action(const ParsedCfg &p) {
-  return espcontrol::media::decode_config_v1(p).cover_art_action ==
-             espcontrol::media::CoverArtAction::CONTROL_MODAL
-    ? "control_modal"
-    : "play_pause";
 }
 
 inline bool media_cover_art_details_enabled(const ParsedCfg &p) {
@@ -715,49 +791,6 @@ inline std::string presence_card_options_normalized(const std::string &options) 
   return cfg_option_token_present(options, "active_color") ? "active_color" : "";
 }
 
-inline std::string normalize_todo_count_display(const std::string &value) {
-  return value == "icon" ? "icon" : "count";
-}
-
-inline std::string normalize_todo_label_display(const std::string &value) {
-  (void) value;
-  return "label";
-}
-
-inline std::string normalize_todo_completed_display(const std::string &value) {
-  (void) value;
-  return "hide";
-}
-
-inline std::string todo_card_options_normalized(const std::string &options) {
-  bool show_count = normalize_todo_count_display(cfg_option_value(options, "count_display")) == "count";
-  std::string out = show_count ? "" : "count_display=icon";
-  if (show_count && (cfg_option_token_present(options, "large_numbers") ||
-      large_numbers_explicitly_disabled(options))) {
-    append_large_numbers_option(out, options);
-  }
-  return out;
-}
-
-inline bool todo_card_show_count(const ParsedCfg &p) {
-  return normalize_todo_count_display(cfg_option_value(p.options, "count_display")) == "count";
-}
-
-inline bool todo_card_shows_top_task(const ParsedCfg &p) {
-  (void) p;
-  return false;
-}
-
-inline bool todo_card_label_shows_count(const ParsedCfg &p) {
-  (void) p;
-  return false;
-}
-
-inline bool todo_card_shows_completed_items(const ParsedCfg &p) {
-  (void) p;
-  return false;
-}
-
 inline std::string normalize_climate_label_display(const std::string &value) {
   return card_runtime_climate_label_display(value);
 }
@@ -851,9 +884,6 @@ inline bool card_large_numbers_supported(const ParsedCfg &p) {
   if (p.type == "media") return p.sensor == "volume" || p.sensor == "position";
   if (climate_card_type(p.type)) {
     return normalize_climate_number_display(cfg_option_value(p.options, "number_display")) != "icon";
-  }
-  if (p.type == "todo") {
-    return normalize_todo_count_display(cfg_option_value(p.options, "count_display")) == "count";
   }
   if (p.type == "subpage") return !p.sensor.empty() && p.sensor != "indicator" && p.precision != "text";
   return card_runtime_large_numbers_supported(p.type, p.precision);
@@ -1058,6 +1088,13 @@ inline std::string action_card_options_normalized(const std::string &options,
 }
 
 inline void normalize_saved_config_action_fields(ParsedCfg &p) {
+  const bool number_entity = p.entity.size() > 7 && p.entity.compare(0, 7, "number.") == 0;
+  const bool input_number_entity =
+    p.entity.size() > 13 && p.entity.compare(0, 13, "input_number.") == 0;
+  if ((p.sensor == "number.set_value" || p.sensor == "input_number.set_value") &&
+      (number_entity || input_number_entity)) {
+    p.sensor = number_entity ? "number.set_value" : "input_number.set_value";
+  }
   if (action_card_option_select(p)) {
     p.sensor = card_runtime_option_select_canonical_action();
     p.unit.clear();
@@ -1171,15 +1208,12 @@ inline std::string normalize_saved_config_weather_options(
 }
 
 inline void normalize_saved_config_image_fields(ParsedCfg &p) {
-  p.icon = image_card_icon_enabled(p)
-    ? (p.icon.empty() || p.icon == "Auto" ? "Camera" : p.icon)
-    : "Auto";
-  if (!image_card_label_enabled(p)) p.label.clear();
+  normalize_image_card_overlay_fields(p.icon, p.options);
 }
 
 inline std::string normalize_saved_config_image_options(
-    const std::string &options, const ParsedCfg &) {
-  return image_card_options_normalized(options);
+    const std::string &options, const ParsedCfg &p) {
+  return image_card_options_normalized(options, p.entity);
 }
 
 inline void normalize_saved_config_climate_fields(ParsedCfg &p) {
@@ -1288,14 +1322,6 @@ inline ParsedCfg normalize_parsed_cfg(ParsedCfg p) {
   const bool normalized_saved_static = normalize_saved_config_static(p);
   normalize_saved_config_date_time(
       p, normalize_saved_config_date_time_fields, date_time_card_options_normalized);
-  if (p.type == "todo") {
-    p.sensor.clear();
-    p.unit.clear();
-    p.precision.clear();
-    p.icon_on = "Auto";
-    if (p.icon.empty() || p.icon == "Auto") p.icon = "Check";
-    p.options = todo_card_options_normalized(p.options);
-  }
   normalize_saved_config_light_control(p, normalize_saved_config_light_control_options);
   normalize_saved_config_subpage(
       p, normalize_saved_config_subpage_fields, normalize_saved_config_subpage_options);
@@ -1318,8 +1344,11 @@ inline ParsedCfg normalize_parsed_cfg(ParsedCfg p) {
   const bool normalized_saved_occupancy = normalize_saved_config_occupancy(
       p, normalize_saved_config_occupancy_fields,
       normalize_saved_config_occupancy_options);
-  if (!normalized_saved_static && !normalized_saved_fan && !normalized_saved_mower && !normalized_saved_occupancy && !normalized_saved_access && !p.type.empty() && p.type != "action" && p.type != "alarm" && p.type != "alarm_action" && !climate_card_type(p.type) && p.type != "webhook" && p.type != "todo" && p.type != "sensor" && p.type != "media" && p.type != "subpage" && p.type != "image" && p.type != "light_control" && p.type != "vacuum" && !card_large_numbers_supported(p)) {
+  if (!normalized_saved_static && !normalized_saved_fan && !normalized_saved_mower && !normalized_saved_occupancy && !normalized_saved_access && !p.type.empty() && p.type != "action" && p.type != "alarm" && p.type != "alarm_action" && !climate_card_type(p.type) && p.type != "webhook" && p.type != "sensor" && p.type != "media" && p.type != "subpage" && p.type != "image" && p.type != "wifi_qr" && p.type != "wifi_qr_card" && p.type != "light_control" && p.type != "vacuum" && !card_large_numbers_supported(p)) {
     p.options.clear();
+  }
+  if ((p.type == "wifi_qr" || p.type == "wifi_qr_card") && p.label.empty()) {
+    p.label = "Connect";
   }
   normalize_saved_config_sensor(p, was_legacy_text_sensor,
                                 normalize_saved_config_sensor_fields,
@@ -1359,9 +1388,19 @@ inline bool cfg_option_enabled(const std::string &options, const char *name) {
 }
 
 inline int media_volume_max_percent(const ParsedCfg &p) {
-  return p.type == "media" && (p.sensor == "volume" || p.sensor == "control_modal")
+  return p.type == "media" && (p.sensor == "volume" || p.sensor == "control_modal" ||
+                               p.sensor == "cover_art" ||
+                               p.sensor == "speaker_group")
     ? normalize_media_volume_max_percent(cfg_option_value(p.options, VOLUME_MAX_OPTION))
     : card_runtime_media_volume_max_default();
+}
+
+inline std::string media_speaker_group_entity(const ParsedCfg &p) {
+  if (p.type != "media" || (p.sensor != "control_modal" && p.sensor != "cover_art" &&
+                            p.sensor != "speaker_group")) {
+    return "";
+  }
+  return trim_saved_option_value(cfg_option_value(p.options, MEDIA_SPEAKER_GROUP_ENTITY_OPTION));
 }
 
 inline bool media_control_card_show_status_label(const ParsedCfg &p) {
@@ -1651,6 +1690,176 @@ constexpr size_t HA_TEXT_SENSOR_STATE_MAX_LEN = 256;
 constexpr size_t HA_SHORT_STATE_MAX_LEN = 32;
 constexpr size_t HA_FRIENDLY_NAME_MAX_LEN = 64;
 
+enum class Utf8DecodeStatus : uint8_t {
+  VALID,
+  INVALID,
+  INCOMPLETE,
+};
+
+struct Utf8CasePair {
+  uint32_t upper;
+  uint32_t lower;
+};
+
+inline Utf8DecodeStatus decode_utf8_codepoint(const std::string &text, size_t offset,
+                                               uint32_t &codepoint, size_t &length) {
+  codepoint = 0;
+  length = 0;
+  if (offset >= text.size()) return Utf8DecodeStatus::INCOMPLETE;
+
+  const unsigned char lead = static_cast<unsigned char>(text[offset]);
+  if (lead < 0x80) {
+    codepoint = lead;
+    length = 1;
+    return Utf8DecodeStatus::VALID;
+  }
+
+  size_t expected = 0;
+  uint32_t value = 0;
+  uint32_t minimum = 0;
+  if (lead >= 0xC2 && lead <= 0xDF) {
+    expected = 2;
+    value = lead & 0x1F;
+    minimum = 0x80;
+  } else if (lead >= 0xE0 && lead <= 0xEF) {
+    expected = 3;
+    value = lead & 0x0F;
+    minimum = 0x800;
+  } else if (lead >= 0xF0 && lead <= 0xF4) {
+    expected = 4;
+    value = lead & 0x07;
+    minimum = 0x10000;
+  } else {
+    length = 1;
+    return Utf8DecodeStatus::INVALID;
+  }
+
+  for (size_t i = 1; i < expected; i++) {
+    if (offset + i >= text.size()) return Utf8DecodeStatus::INCOMPLETE;
+    const unsigned char continuation = static_cast<unsigned char>(text[offset + i]);
+    if ((continuation & 0xC0) != 0x80) {
+      length = 1;
+      return Utf8DecodeStatus::INVALID;
+    }
+    value = (value << 6) | (continuation & 0x3F);
+  }
+  if (value < minimum || value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF)) {
+    length = 1;
+    return Utf8DecodeStatus::INVALID;
+  }
+
+  codepoint = value;
+  length = expected;
+  return Utf8DecodeStatus::VALID;
+}
+
+inline void append_utf8_codepoint(std::string &out, uint32_t codepoint) {
+  if (codepoint <= 0x7F) {
+    out.push_back(static_cast<char>(codepoint));
+  } else if (codepoint <= 0x7FF) {
+    out.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+    out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+  } else if (codepoint <= 0xFFFF) {
+    out.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+    out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+  } else {
+    out.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+    out.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+  }
+}
+
+inline const Utf8CasePair *utf8_latin_case_pairs(size_t &count) {
+  // Locale-dependent Turkish dotted/dotless I are deliberately left unchanged.
+  static const Utf8CasePair pairs[] = {
+    {0x00C0, 0x00E0}, {0x00C1, 0x00E1}, {0x00C2, 0x00E2}, {0x00C3, 0x00E3},
+    {0x00C4, 0x00E4}, {0x00C5, 0x00E5}, {0x00C6, 0x00E6}, {0x00C7, 0x00E7},
+    {0x00C8, 0x00E8}, {0x00C9, 0x00E9}, {0x00CA, 0x00EA}, {0x00CB, 0x00EB},
+    {0x00CC, 0x00EC}, {0x00CD, 0x00ED}, {0x00CE, 0x00EE}, {0x00CF, 0x00EF},
+    {0x00D0, 0x00F0}, {0x00D1, 0x00F1}, {0x00D2, 0x00F2}, {0x00D3, 0x00F3},
+    {0x00D4, 0x00F4}, {0x00D5, 0x00F5}, {0x00D6, 0x00F6}, {0x00D8, 0x00F8},
+    {0x00D9, 0x00F9}, {0x00DA, 0x00FA}, {0x00DB, 0x00FB}, {0x00DC, 0x00FC},
+    {0x00DD, 0x00FD}, {0x00DE, 0x00FE}, {0x0102, 0x0103}, {0x0104, 0x0105},
+    {0x0106, 0x0107}, {0x010C, 0x010D}, {0x010E, 0x010F}, {0x0110, 0x0111},
+    {0x0118, 0x0119}, {0x011A, 0x011B}, {0x011E, 0x011F}, {0x0139, 0x013A}, {0x013D, 0x013E}, {0x0141, 0x0142},
+    {0x0143, 0x0144}, {0x0147, 0x0148}, {0x0150, 0x0151}, {0x0154, 0x0155},
+    {0x0158, 0x0159}, {0x015A, 0x015B}, {0x015E, 0x015F}, {0x0160, 0x0161},
+    {0x0164, 0x0165}, {0x016E, 0x016F}, {0x0170, 0x0171}, {0x0179, 0x017A},
+    {0x017B, 0x017C}, {0x017D, 0x017E}, {0x0218, 0x0219}, {0x021A, 0x021B},
+    {0x1E62, 0x1E63},
+  };
+  count = sizeof(pairs) / sizeof(pairs[0]);
+  return pairs;
+}
+
+inline uint32_t utf8_latin_case(uint32_t codepoint, bool uppercase) {
+  size_t count = 0;
+  const Utf8CasePair *pairs = utf8_latin_case_pairs(count);
+  for (size_t i = 0; i < count; i++) {
+    if (codepoint == pairs[i].upper || codepoint == pairs[i].lower) {
+      return uppercase ? pairs[i].upper : pairs[i].lower;
+    }
+  }
+  return codepoint;
+}
+
+inline bool utf8_letter_like(uint32_t codepoint) {
+  if (codepoint < 0x80) {
+    return std::isalpha(static_cast<unsigned char>(codepoint));
+  }
+  // Latin ranges exclude the multiplication and division symbols.
+  if ((codepoint >= 0x00C0 && codepoint <= 0x00D6) ||
+      (codepoint >= 0x00D8 && codepoint <= 0x00F6) ||
+      (codepoint >= 0x00F8 && codepoint <= 0x02AF) ||
+      (codepoint >= 0x1E00 && codepoint <= 0x1EFF)) {
+    return true;
+  }
+  // Unicode 16.0 Letter-category ranges within the supported script blocks.
+  // Punctuation, symbols, combining marks and unassigned positions must not
+  // consume a pending capital letter (for example Greek U+037E or Hebrew U+05BE).
+  return (codepoint >= 0x0370 && codepoint <= 0x0374) ||
+         (codepoint >= 0x0376 && codepoint <= 0x0377) ||
+         (codepoint >= 0x037A && codepoint <= 0x037D) ||
+         codepoint == 0x037F || codepoint == 0x0386 ||
+         (codepoint >= 0x0388 && codepoint <= 0x038A) ||
+         codepoint == 0x038C ||
+         (codepoint >= 0x038E && codepoint <= 0x03A1) ||
+         (codepoint >= 0x03A3 && codepoint <= 0x03F5) ||
+         (codepoint >= 0x03F7 && codepoint <= 0x03FF) ||
+         (codepoint >= 0x0400 && codepoint <= 0x0481) ||
+         (codepoint >= 0x048A && codepoint <= 0x052F) ||
+         (codepoint >= 0x05D0 && codepoint <= 0x05EA) ||
+         (codepoint >= 0x05EF && codepoint <= 0x05F2);
+}
+
+inline bool append_title_case_character(const std::string &text, size_t &offset,
+                                        std::string &out, bool &cap_next) {
+  uint32_t codepoint = 0;
+  size_t length = 0;
+  const Utf8DecodeStatus status = decode_utf8_codepoint(text, offset, codepoint, length);
+  if (status == Utf8DecodeStatus::INCOMPLETE) return false;
+  if (status == Utf8DecodeStatus::INVALID) {
+    out.push_back(text[offset]);
+    offset += length;
+    return true;
+  }
+
+  if (utf8_letter_like(codepoint)) {
+    if (codepoint < 0x80) {
+      const unsigned char ascii = static_cast<unsigned char>(codepoint);
+      codepoint = static_cast<uint32_t>(cap_next ? std::toupper(ascii) : std::tolower(ascii));
+    } else {
+      codepoint = utf8_latin_case(codepoint, cap_next);
+    }
+    cap_next = false;
+  }
+  append_utf8_codepoint(out, codepoint);
+  offset += length;
+  return true;
+}
+
 inline std::string normalized_state_text(esphome::StringRef value,
                                          size_t max_len = HA_SHORT_STATE_MAX_LEN) {
   std::string text = trim_display_unit(string_ref_limited(value, max_len));
@@ -1667,37 +1876,38 @@ inline std::string text_sensor_display_text(esphome::StringRef value,
   out.reserve(raw.size());
   bool cap_next = true;
   bool last_space = false;
-  for (size_t i = 0; i < raw.size(); i++) {
+  for (size_t i = 0; i < raw.size();) {
     char ch = raw[i];
     unsigned char c = static_cast<unsigned char>(ch);
     if (ch == '\r' || ch == '\n') {
-      if (ch == '\r' && i + 1 < raw.size() && raw[i + 1] == '\n') continue;
+      if (ch == '\r' && i + 1 < raw.size() && raw[i + 1] == '\n') {
+        i++;
+        continue;
+      }
       if (!out.empty() && out.back() == ' ') out.pop_back();
       if (!out.empty() && out.back() != '\n') out.push_back('\n');
       cap_next = true;
       last_space = false;
+      i++;
       continue;
     }
     if (ch == '-' && !out.empty() && out.back() != '\n' && out.back() != ' ') {
       out.push_back(ch);
       cap_next = true;
       last_space = false;
+      i++;
       continue;
     }
-    if (ch == '_' || std::isspace(c)) {
+    if (ch == '_' || (c < 0x80 && std::isspace(c))) {
       if (!out.empty() && !last_space && out.back() != '\n') {
         out.push_back(' ');
         last_space = true;
       }
       cap_next = true;
+      i++;
       continue;
     }
-    if (std::isalpha(c)) {
-      out.push_back(static_cast<char>(cap_next ? std::toupper(c) : std::tolower(c)));
-      cap_next = false;
-    } else {
-      out.push_back(ch);
-    }
+    if (!append_title_case_character(raw, i, out, cap_next)) break;
     last_space = false;
   }
   while (!out.empty() && (out.back() == ' ' || out.back() == '\n')) out.pop_back();
@@ -1739,13 +1949,19 @@ inline std::string sensor_state_display_text(const ParsedCfg &p,
 }
 
 inline void lv_label_set_text_limited(lv_obj_t *label, esphome::StringRef value, size_t max_len) {
-  std::string text = string_ref_limited(value, max_len);
+  std::string text = normalize_display_text(string_ref_limited(value, max_len));
   lv_label_set_text(label, text.c_str());
 }
 
 inline bool parse_float_ref(esphome::StringRef value, float &out) {
   char *end;
   out = strtof(value.c_str(), &end);
+  return end != value.c_str();
+}
+
+inline bool parse_double_ref(esphome::StringRef value, double &out) {
+  char *end;
+  out = std::strtod(value.c_str(), &end);
   return end != value.c_str();
 }
 
@@ -1781,7 +1997,9 @@ inline bool ha_state_unavailable_ref(esphome::StringRef state) {
 
 inline bool ha_entity_accepts_unknown_state(const std::string &entity_id) {
   return (entity_id.size() > 7 && entity_id.compare(0, 7, "button.") == 0) ||
-         (entity_id.size() > 13 && entity_id.compare(0, 13, "input_button.") == 0);
+         (entity_id.size() > 13 && entity_id.compare(0, 13, "input_button.") == 0) ||
+         (entity_id.size() > 7 && entity_id.compare(0, 7, "select.") == 0) ||
+         (entity_id.size() > 13 && entity_id.compare(0, 13, "input_select.") == 0);
 }
 
 inline bool ha_entity_state_unavailable_ref(const std::string &entity_id,
@@ -1821,22 +2039,19 @@ inline std::string sentence_cap_text(const std::string &state) {
   out.reserve(state.size());
   bool cap_next = true;
   bool last_space = false;
-  for (char ch : state) {
+  for (size_t i = 0; i < state.size();) {
+    char ch = state[i];
     unsigned char c = static_cast<unsigned char>(ch);
-    if (ch == '_' || ch == '-' || std::isspace(c)) {
+    if (ch == '_' || ch == '-' || (c < 0x80 && std::isspace(c))) {
       if (!out.empty() && !last_space) {
         out.push_back(' ');
         last_space = true;
       }
       cap_next = true;
+      i++;
       continue;
     }
-    if (std::isalpha(c)) {
-      out.push_back(static_cast<char>(cap_next ? std::toupper(c) : std::tolower(c)));
-      cap_next = false;
-    } else {
-      out.push_back(ch);
-    }
+    if (!append_title_case_character(state, i, out, cap_next)) break;
     last_space = false;
   }
   if (!out.empty() && out.back() == ' ') out.pop_back();

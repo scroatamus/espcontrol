@@ -10,10 +10,14 @@ Usage:
     python scripts/build.py icons         # sync icons only
     python scripts/build.py i18n          # sync firmware translations only
     python scripts/build.py www           # build www.js only
+    python scripts/build.py www --retain-current-bundle  # retain a release bundle
+    python scripts/build.py www --legacy-web-manifest PATH  # use the published bundle as the legacy bundle
     python scripts/build.py www --temporary-output DIR  # isolated fresh bundles
     python scripts/build.py icons --check # check icons only
     python scripts/build.py --self-test    # verify transactional publishing
 """
+import base64
+import hashlib
 import json
 import os
 import re
@@ -30,22 +34,75 @@ from product_schema import (
     assert_card_contract_valid,
     assert_entity_names_valid as assert_product_entity_names_valid,
 )
+from product_model_v2 import load_product_model_v2, source_directory, source_path
 
 ROOT = Path(__file__).resolve().parent.parent
 MDI_VERSION = "7.4.47"
 MDI_CSS_URL = f"https://cdn.jsdelivr.net/npm/@mdi/font@{MDI_VERSION}/css/materialdesignicons.css"
+MDI_WEB_FONT = ROOT / "common" / "assets" / "fonts" / f"materialdesignicons-webfont-{MDI_VERSION}.ttf"
+INTER_WEB_FONT = ROOT / "node_modules" / "vitepress" / "dist" / "client" / "theme-default" / "fonts" / "inter-roman-latin.woff2"
+ROBOTO_WEB_FONT = ROOT / "common" / "assets" / "fonts" / "roboto-latin.woff2"
+SUPPORT_BUTTON_IMAGE = ROOT / "common" / "assets" / "images" / "buy-me-a-coffee-button.png"
+WEB_SOURCE_DIR = ROOT / "src" / "webserver"
+WEB_BUNDLE_RETENTION = ROOT / "docs" / "public" / "webserver" / "bundle-retention.json"
+
+# Keep this list aligned with the GitHub Pages release catalogue in pages.yml.
+# The current source bundle is intentionally restricted to development firmware
+# (and the release being prepared). Stable firmware keeps using the retained
+# bundle from the latest published source until that firmware contains the
+# matching generated icon glyphs.
+WEB_ASSET_SUPPORTED_FIRMWARE_VERSIONS = (
+    "dev",
+    "v2.10.0",
+    "v2.9.1",
+    "v2.9.0",
+    "v2.8.6",
+    "v2.8.4",
+)
+WEB_ASSET_CURRENT_FIRMWARE_VERSION = None
+# Local fallback for builds that do not have the currently published manifest.
+# Release and Pages workflows pass --legacy-web-manifest so this rotates with
+# the published release instead of remaining pinned here.
+WEB_ASSET_LEGACY_BUNDLE_ID = "42f3fd87eb8cbfab59943a7643a19416ded29eddb8608498ada20e95b416fd49"
+WEB_ASSET_LEGACY_BUNDLE_PATH = f"bundles/{WEB_ASSET_LEGACY_BUNDLE_ID}/www.js"
+
+# Fixed editor controls use a few MDI glyphs that are not selectable Product
+# Model icons. Keep their pinned codepoints here so rebuilding www.js remains
+# possible without reaching the MDI CDN. Product Model icon codepoints are
+# read directly from product/v2/icons.json below.
+WEB_FIXED_MDI_ICON_CODEPOINTS = {
+    "alarm": "F0020", "album": "F0025", "api": "F109B", "arrow-expand-all": "F004C",
+    "arrow-top-right": "F005C", "blur": "F00B5", "calendar": "F00ED", "calendar-clock": "F00F0",
+    "calendar-month": "F0E17", "cancel": "F073A", "card": "F0B6F", "card-outline": "F0B76",
+    "chip": "F061A", "clipboard-outline": "F014C", "clock": "F0954", "code-json": "F0626",
+    "content-copy": "F018F", "content-cut": "F0190", "content-paste": "F0192", "counter": "F0199",
+    "decimal": "F10A1", "domain": "F01D7", "drag": "F01DB", "eye-off-outline": "F06D1",
+    "eye-outline": "F06D0", "factory": "F020F", "file": "F0214", "flag": "F023B", "folder-plus": "F0257",
+    "form-dropdown": "F1400", "format-text": "F0284", "function": "F0295", "gesture-tap-button": "F12A8",
+    "grid": "F02C1", "home-automation": "F07D1", "home-import-outline": "F0F9C", "hook": "F06E2",
+    "information-outline": "F02FD", "keyboard-return": "F0311", "label": "F0315", "lightbulb-on": "F06E8",
+    "link": "F0337", "loading": "F0772", "map-clock": "F0D1E", "map-marker-path": "F0D20",
+    "map-marker-question": "F0F07", "movie": "F0381", "movie-open": "F0FCE", "network": "F06F3",
+    "note": "F039A", "numeric": "F03A0", "pencil": "F03EB", "plex": "F06BA", "podcast": "F0994",
+    "post": "F1008", "restore": "F099B", "script": "F0BC1", "script-text-play": "F1727",
+    "security": "F0483", "select": "F0485", "spotify": "F04C7", "svg": "F0721", "switch": "F04E4", "sync": "F04E6",
+    "tab": "F04E9", "target": "F04FE", "text": "F09A8", "timer": "F13AB",
+    "toggle-switch": "F0521", "toggle-switch-variant": "F1A25", "toggle-switch-variant-off": "F1A26",
+    "tune-vertical": "F066A", "tune-vertical-variant": "F1543", "upload": "F0552", "video": "F0567",
+    "view-grid-plus": "F0F8D", "webhook": "F062F",
+}
 
 # ---------------------------------------------------------------------------
 # Shared paths
 # ---------------------------------------------------------------------------
-ICONS_JSON = ROOT / "common" / "assets" / "icons.json"
-ENTITY_NAMES_JSON = ROOT / "common" / "config" / "entity_names.json"
+ICONS_JSON = source_path("icons")
+ENTITY_NAMES_JSON = source_path("entityNames")
 ENTITY_NAMES_YAML = ROOT / "common" / "config" / "entity_names.yaml"
 ENTITY_NAMES_TS = ROOT / "src" / "webserver" / "generated" / "entity_catalog.ts"
 WEB_ICONS_TS = ROOT / "src" / "webserver" / "generated" / "icons.ts"
-STRINGS_DIR = ROOT / "common" / "config"
+STRINGS_DIR = source_directory("translations")
 I18N_GENERATED_H = ROOT / "components" / "espcontrol" / "i18n_generated.h"
-CARD_CONTRACT_JSON = ROOT / "common" / "config" / "card_contract.json"
+CARD_CONTRACT_JSON = source_path("cardContract")
 CARD_CONTRACT_TS = ROOT / "src" / "webserver" / "generated" / "card_contract.ts"
 CARD_CONTRACT_H = ROOT / "components" / "espcontrol" / "button_grid_contract_generated.h"
 SAVED_CONFIG_SHADOW_TS = ROOT / "src" / "webserver" / "generated" / "saved_config_shadow.ts"
@@ -105,8 +162,11 @@ class GeneratedOutputTransaction:
     def stage_text(self, path, content):
         self._staged[Path(path).resolve()] = content
 
+    def stage_delete(self, path):
+        self._staged[Path(path).resolve()] = None
+
     def overlays(self):
-        return {str(path): content for path, content in self._staged.items()}
+        return {str(path): content for path, content in self._staged.items() if content is not None}
 
     def commit(self):
         if not self._staged:
@@ -120,6 +180,9 @@ class GeneratedOutputTransaction:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 target_mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
                 originals[path] = (path.read_bytes(), target_mode) if path.exists() else None
+                if content is None:
+                    prepared[path] = None
+                    continue
                 with tempfile.NamedTemporaryFile(
                     mode="w",
                     encoding="utf-8",
@@ -135,7 +198,10 @@ class GeneratedOutputTransaction:
                     prepared[path] = Path(handle.name)
 
             for path, staged_path in prepared.items():
-                self._replace_file(staged_path, path)
+                if staged_path is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    self._replace_file(staged_path, path)
                 replaced.append(path)
         except Exception as exc:
             for path in reversed(replaced):
@@ -160,7 +226,8 @@ class GeneratedOutputTransaction:
             raise BuildError(f"Unable to publish generated outputs; restored the previous set: {exc}") from exc
         finally:
             for staged_path in prepared.values():
-                staged_path.unlink(missing_ok=True)
+                if staged_path is not None:
+                    staged_path.unlink(missing_ok=True)
 
 
 GENERATED_TRANSACTION = None
@@ -209,6 +276,7 @@ def run_generated_transaction_self_test():
             os.replace(source, destination)
 
         transaction = GeneratedOutputTransaction(replace_file=fail_second_replace)
+        transaction.stage_delete(third)
         transaction.stage_text(first, "first-broken")
         transaction.stage_text(second, "second-broken")
         try:
@@ -222,18 +290,35 @@ def run_generated_transaction_self_test():
         if first.stat().st_mode & 0o777 != 0o640:
             raise BuildError("Generated transaction rollback did not restore file permissions")
 
+        if third.read_text() != "third-new":
+            raise BuildError("Generated transaction did not restore a deleted output")
+        transaction = GeneratedOutputTransaction()
+        transaction.stage_delete(third)
+        transaction.commit()
+        if third.exists():
+            raise BuildError("Generated transaction did not delete a stale output")
+
         marker = "espcontrol-generated-overlay-self-test"
         entry_path = ROOT / "src" / "webserver" / "entry.ts"
         entry_overlay = entry_path.read_text(encoding="utf-8") + (
             f'\n(globalThis as Record<string, unknown>)["{marker}"] = true;\n'
         )
         slug, config = next(iter(build_web_devices().items()))
+        original_urlopen = urllib.request.urlopen
+        try:
+            urllib.request.urlopen = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("web bundle build unexpectedly accessed the network")
+            )
+            embedded_mdi_styles = embedded_web_mdi_styles()
+        finally:
+            urllib.request.urlopen = original_urlopen
         bundle_root = root / "bundle"
         result = subprocess.run(
             ["node", str(ROOT / "scripts" / "build_web_bundle.js")],
             input=json.dumps({
                 "outputDir": str(bundle_root),
                 "devices": {slug: config},
+                "embeddedMdiStyles": embedded_mdi_styles,
                 "testHooks": False,
                 "overlays": {str(entry_path): entry_overlay},
             }),
@@ -243,7 +328,7 @@ def run_generated_transaction_self_test():
         )
         if result.returncode != 0:
             raise BuildError(result.stderr.strip() or "Generated overlay self-test could not build a web bundle")
-        bundle = (bundle_root / "www.js").read_text(encoding="utf-8")
+        bundle = (bundle_root / "app.js").read_text(encoding="utf-8")
         if marker not in bundle:
             raise BuildError("Web bundle did not consume the staged generated overlay")
 
@@ -260,7 +345,7 @@ def load_entity_names_data():
 
 
 def load_card_contract_data():
-    return load_json(CARD_CONTRACT_JSON)
+    return load_product_model_v2().card_contract_data()
 
 
 def replace_between_markers(text, start_tag, end_tag, new_content):
@@ -351,7 +436,7 @@ def gen_entity_names_yaml(data):
     lines = [
         "# =============================================================================\n",
         "# GENERATED ENTITY NAMES - do not edit by hand\n",
-        "# Generated by scripts/build.py from common/config/entity_names.json.\n",
+        "# Generated by scripts/build.py from product/v2/entity_names.json.\n",
         "# =============================================================================\n",
         "\n",
         "substitutions:\n",
@@ -391,7 +476,7 @@ def gen_entity_names_js(data):
     return (
         "// =============================================================================\n"
         "// GENERATED ENTITY CATALOG - do not edit by hand\n"
-        "// Generated by scripts/build.py from common/config/entity_names.json.\n"
+        "// Generated by scripts/build.py from product/v2/entity_names.json.\n"
         "// =============================================================================\n"
         f"export const ENTITY_CATALOG = {json_text} as const;\n"
     )
@@ -497,7 +582,7 @@ def gen_i18n_header():
     lines = [
         "// =============================================================================",
         "// GENERATED FIRMWARE I18N - do not edit by hand",
-        "// Generated by scripts/build.py from common/config/strings.*.txt.",
+        "// Generated by scripts/build.py from product/v2/translations/strings.*.txt.",
         "// =============================================================================",
         "#pragma once",
         "#include <cstring>",
@@ -662,7 +747,7 @@ def gen_card_contract_ts(data):
     return (
         "// =============================================================================\n"
         "// GENERATED TYPED CARD CONFIG CONTRACT - do not edit by hand\n"
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n"
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n"
         "// =============================================================================\n"
         "import type { CardConfig, CardOptionSpec, CardRuntimeSpec, CardTypeSpec, MigrationActionSpec, ResolvedCardRuntimeSpec, SavedConfigField } from \"../contracts/types\";\n"
         "\n"
@@ -960,7 +1045,7 @@ def gen_saved_config_vacuum_ts(data):
     return (
         "// =============================================================================\n"
         "// GENERATED SAVED-CONFIG VACUUM HELPERS - do not edit by hand\n"
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n"
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n"
         "// =============================================================================\n"
         "import type { CardConfig } from \"../contracts/types\";\n\n"
         + "".join(migration_lines)
@@ -1002,7 +1087,7 @@ def gen_saved_config_vacuum_h(data):
         "#pragma once\n\n"
         "// =============================================================================\n"
         "// GENERATED SAVED-CONFIG VACUUM HELPERS - do not edit by hand\n"
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n"
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n"
         "// =============================================================================\n\n"
         "#include <string>\n\n"
         + "".join(migration_lines)
@@ -1030,7 +1115,7 @@ def gen_saved_config_sensor_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG SENSOR HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export function migrateSavedConfigSensorLegacy(config: CardConfig): boolean {\n",
@@ -1067,7 +1152,7 @@ def gen_saved_config_sensor_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG SENSOR HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config>\ninline bool migrate_saved_config_sensor_legacy(Config &config) {\n",
     ]
@@ -1097,7 +1182,7 @@ def gen_saved_config_action_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG ACTION HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export function migrateSavedConfigActionLegacy(config: CardConfig): boolean {\n",
@@ -1133,7 +1218,7 @@ def gen_saved_config_action_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG ACTION HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config>\ninline bool migrate_saved_config_action_legacy(Config &config) {\n",
     ]
@@ -1165,7 +1250,7 @@ def gen_saved_config_media_ts(data):
     return (
         "// =============================================================================\n"
         "// GENERATED SAVED-CONFIG MEDIA HELPERS - do not edit by hand\n"
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n"
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n"
         "// =============================================================================\n"
         'import type { CardConfig } from "../contracts/types";\n\n'
         "export type SavedConfigMediaFieldHook = (config: CardConfig) => void;\n"
@@ -1189,7 +1274,7 @@ def gen_saved_config_media_h(data):
         "#pragma once\n\n"
         "// =============================================================================\n"
         "// GENERATED SAVED-CONFIG MEDIA HELPERS - do not edit by hand\n"
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n"
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n"
         "// =============================================================================\n\n"
         "template<typename Config, typename FieldHook, typename OptionHook>\n"
         "inline bool normalize_saved_config_media(Config &config, FieldHook normalize_fields,\n"
@@ -1268,7 +1353,7 @@ def gen_saved_config_static_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG STATIC CARD HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export function normalizeSavedConfigStatic(config: CardConfig): boolean {\n",
@@ -1287,7 +1372,7 @@ def gen_saved_config_static_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG STATIC CARD HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config>\n",
         "inline bool normalize_saved_config_static(Config &config) {\n",
@@ -1339,7 +1424,7 @@ def gen_saved_config_fan_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG FAN HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigFanFieldHook = (config: CardConfig) => void;\n",
@@ -1376,7 +1461,7 @@ def gen_saved_config_fan_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG FAN HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename FieldHook, typename OptionHook>\n",
         "inline bool normalize_saved_config_fan(Config &config, FieldHook normalize_fields,\n",
@@ -1432,7 +1517,7 @@ def gen_saved_config_date_time_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG DATE/TIME HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigDateTimeFieldHook = (config: CardConfig) => void;\n",
@@ -1469,7 +1554,7 @@ def gen_saved_config_date_time_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG DATE/TIME HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename FieldHook, typename OptionHook>\n",
         "inline bool normalize_saved_config_date_time(Config &config, FieldHook normalize_fields,\n",
@@ -1518,7 +1603,7 @@ def gen_saved_config_mower_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG LAWN MOWER HELPER - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigMowerFieldHook = (config: CardConfig) => void;\n\n",
@@ -1549,7 +1634,7 @@ def gen_saved_config_mower_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG LAWN MOWER HELPER - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename FieldHook>\n",
         "inline bool normalize_saved_config_mower(Config &config, FieldHook normalize_fields) {\n",
@@ -1598,7 +1683,7 @@ def gen_saved_config_occupancy_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG OCCUPANCY HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigOccupancyFieldHook = (config: CardConfig) => void;\n",
@@ -1635,7 +1720,7 @@ def gen_saved_config_occupancy_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG OCCUPANCY HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename FieldHook, typename OptionHook>\n",
         "inline bool normalize_saved_config_occupancy(Config &config, FieldHook normalize_fields,\n",
@@ -1694,7 +1779,7 @@ def gen_saved_config_access_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG ACCESS HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigAccessFieldHook = (config: CardConfig) => void;\n",
@@ -1731,7 +1816,7 @@ def gen_saved_config_access_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG ACCESS HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename FieldHook, typename OptionHook>\n",
         "inline bool normalize_saved_config_access(Config &config, FieldHook normalize_fields,\n",
@@ -1786,7 +1871,7 @@ def gen_saved_config_security_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG SECURITY HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigSecurityFieldHook = (config: CardConfig) => void;\n",
@@ -1823,7 +1908,7 @@ def gen_saved_config_security_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG SECURITY HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename FieldHook, typename OptionHook>\n",
         "inline bool normalize_saved_config_security(Config &config, FieldHook normalize_fields,\n",
@@ -1878,7 +1963,7 @@ def gen_saved_config_weather_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG WEATHER HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigWeatherFieldHook = (config: CardConfig, wasLegacyForecast: boolean) => void;\n",
@@ -1921,7 +2006,7 @@ def gen_saved_config_weather_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG WEATHER HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config>\n",
         "inline bool migrate_saved_config_weather_legacy(Config &config) {\n",
@@ -1977,7 +2062,7 @@ def gen_saved_config_image_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG IMAGE HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigImageFieldHook = (config: CardConfig) => void;\n",
@@ -2013,7 +2098,7 @@ def gen_saved_config_image_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG IMAGE HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename FieldHook, typename OptionHook>\n",
         "inline bool normalize_saved_config_image(Config &config, FieldHook normalize_fields,\n",
@@ -2064,7 +2149,7 @@ def gen_saved_config_climate_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG CLIMATE HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigClimateFieldHook = (config: CardConfig) => void;\n",
@@ -2100,7 +2185,7 @@ def gen_saved_config_climate_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG CLIMATE HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename FieldHook, typename OptionHook>\n",
         "inline bool normalize_saved_config_climate(Config &config, FieldHook normalize_fields,\n",
@@ -2142,7 +2227,7 @@ def gen_saved_config_light_control_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG LIGHT CONTROL HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigLightControlOptionHook = (options: string, config: CardConfig) => string;\n\n",
@@ -2170,7 +2255,7 @@ def gen_saved_config_light_control_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG LIGHT CONTROL HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename OptionHook>\n",
         "inline bool normalize_saved_config_light_control(Config &config,\n",
@@ -2212,7 +2297,7 @@ def gen_saved_config_webhook_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG WEBHOOK HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigWebhookFieldHook = (config: CardConfig) => void;\n",
@@ -2248,7 +2333,7 @@ def gen_saved_config_webhook_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG WEBHOOK HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename FieldHook, typename OptionHook>\n",
         "inline bool normalize_saved_config_webhook(Config &config, FieldHook normalize_fields,\n",
@@ -2296,7 +2381,7 @@ def gen_saved_config_subpage_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG SUBPAGE HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigSubpageFieldHook = (config: CardConfig) => void;\n",
@@ -2332,7 +2417,7 @@ def gen_saved_config_subpage_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG SUBPAGE HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename FieldHook, typename OptionHook>\n",
         "inline bool normalize_saved_config_subpage(Config &config, FieldHook normalize_fields,\n",
@@ -2374,7 +2459,7 @@ def gen_saved_config_switch_ts(data):
     lines = [
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG SWITCH HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         'import type { CardConfig } from "../contracts/types";\n\n',
         "export type SavedConfigSwitchOptionHook = (options: string, config: CardConfig) => string;\n\n",
@@ -2402,7 +2487,7 @@ def gen_saved_config_switch_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG SWITCH HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n\n",
         "template<typename Config, typename OptionHook>\n",
         "inline bool normalize_saved_config_switch(Config &config,\n",
@@ -2435,7 +2520,7 @@ def gen_saved_config_shadow_ts(data):
     return (
         "// =============================================================================\n"
         "// GENERATED SAVED-CONFIG SHADOW HELPERS - do not edit by hand\n"
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n"
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n"
         "// Test-only shadow code: production normalization does not call this module.\n"
         "// =============================================================================\n"
         "import type { CardConfig, CardNormalizationSpec, MigrationActionSpec, NormalizationCondition } from \"../contracts/types\";\n"
@@ -2543,6 +2628,8 @@ def gen_saved_config_shadow_ts(data):
         "  if (config.type === \"local\") { config.type = \"action\"; config.sensor = \"local\"; }\n"
         "  if (config.type === \"option_select\") { config.type = \"action\"; config.sensor = \"input_select.select_option\"; }\n"
         "  if (config.type !== \"action\") return null;\n"
+        "  const entityDomain = config.entity.split(\".\")[0] || \"\";\n"
+        "  if ([\"number.set_value\", \"input_number.set_value\"].indexOf(config.sensor) >= 0 && [\"number\", \"input_number\"].indexOf(entityDomain) >= 0) config.sensor = entityDomain + \".set_value\";\n"
         "  if (ACTION_OPTION_SELECT_ACTIONS.indexOf(config.sensor as typeof ACTION_OPTION_SELECT_ACTIONS[number]) >= 0) {\n"
         "    config.sensor = \"input_select.select_option\"; config.unit = \"\"; config.precision = \"\"; config.options = \"\"; config.icon_on = \"Auto\";\n"
         "    if (!config.icon || config.icon === \"Auto\" || config.icon === \"Chevron Down\") config.icon = \"Flash\"; return config;\n"
@@ -2592,7 +2679,7 @@ def gen_saved_config_shadow_ts(data):
         "  if (config.sensor === \"control_modal\") {\n"
         "    if (optionValue(source, \"label_display\").trim() === \"label\") out.push(\"label_display=label\"); if (optionValue(source, \"number_display\").trim() === \"volume\") out.push(\"number_display=volume\"); if (maxVolume !== MEDIA_VOLUME_DEFAULT) out.push(\"volume_max=\" + maxVolume);\n"
         "  } else if (config.sensor === \"cover_art\") {\n"
-        "    if (optionValue(source, \"cover_art_action\").trim() === \"control_modal\") out.push(\"cover_art_action=control_modal\"); if (optionPresent(source, \"cover_art_details\")) out.push(\"cover_art_details\"); const secondaryEntity = optionValue(source, \"cover_art_secondary_entity\").trim(); if (secondaryEntity) out.push(\"cover_art_secondary_entity=\" + encodeOptionValue(secondaryEntity));\n"
+        "    if (optionPresent(source, \"cover_art_details\")) out.push(\"cover_art_details\"); const secondaryEntity = optionValue(source, \"cover_art_secondary_entity\").trim(); if (secondaryEntity) out.push(\"cover_art_secondary_entity=\" + encodeOptionValue(secondaryEntity)); const speakerGroupEntity = optionValue(source, \"speaker_group_entity\").trim(); if (speakerGroupEntity) out.push(\"speaker_group_entity=\" + encodeOptionValue(speakerGroupEntity)); if (maxVolume !== MEDIA_VOLUME_DEFAULT) out.push(\"volume_max=\" + maxVolume);\n"
         "  } else if (config.sensor === \"playlist\") {\n"
         "    for (const [name, defaultValue] of [[\"playlist_content_id\", \"\"], [\"playlist_content_type\", \"playlist\"], [\"playlist_player_source\", \"\"]] as const) { const value = optionValue(source, name).trim() || defaultValue; if (value && value !== defaultValue) out.push(name + \"=\" + encodeOptionValue(value)); }\n"
         "  } else if (config.sensor === \"volume\" || config.sensor === \"position\") {\n"
@@ -2625,7 +2712,7 @@ def gen_saved_config_shadow_h(data):
         "#pragma once\n\n",
         "// =============================================================================\n",
         "// GENERATED SAVED-CONFIG SHADOW HELPERS - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// Test-only shadow code: production firmware does not include this header.\n",
         "// =============================================================================\n\n",
         "#include <cstddef>\n#include <string>\n\n",
@@ -2711,6 +2798,9 @@ def gen_saved_config_shadow_h(data):
         "  if (config.type == \"local\") { config.type = \"action\"; config.sensor = \"local\"; }\n",
         "  if (config.type == \"option_select\") { config.type = \"action\"; config.sensor = \"input_select.select_option\"; }\n",
         "  if (config.type != \"action\") return false;\n",
+        "  const bool number_entity = config.entity.size() > 7 && config.entity.compare(0, 7, \"number.\") == 0;\n",
+        "  const bool input_number_entity = config.entity.size() > 13 && config.entity.compare(0, 13, \"input_number.\") == 0;\n",
+        "  if ((config.sensor == \"number.set_value\" || config.sensor == \"input_number.set_value\") && (number_entity || input_number_entity)) config.sensor = number_entity ? \"number.set_value\" : \"input_number.set_value\";\n",
         "  if (config.icon.empty()) config.icon = \"Auto\";\n",
         "  if (config.icon_on.empty()) config.icon_on = \"Auto\";\n",
         "  if (saved_config_shadow_string_in(config.sensor, SAVED_CONFIG_SHADOW_ACTION_OPTION_SELECT_ACTIONS, sizeof(SAVED_CONFIG_SHADOW_ACTION_OPTION_SELECT_ACTIONS) / sizeof(SAVED_CONFIG_SHADOW_ACTION_OPTION_SELECT_ACTIONS[0]))) {\n",
@@ -2789,10 +2879,12 @@ def gen_saved_config_shadow_h(data):
         "    if (saved_config_shadow_trim(cfg_option_value(source, \"number_display\")) == \"volume\") saved_config_shadow_append_option(out, \"number_display\", \"volume\");\n",
         "    if (max_volume != SAVED_CONFIG_SHADOW_MEDIA_VOLUME_DEFAULT) saved_config_shadow_append_option(out, \"volume_max\", std::to_string(max_volume));\n",
         "  } else if (config.sensor == \"cover_art\") {\n",
-        "    if (saved_config_shadow_trim(cfg_option_value(source, \"cover_art_action\")) == \"control_modal\") saved_config_shadow_append_option(out, \"cover_art_action\", \"control_modal\");\n",
         "    if (cfg_option_token_present(source, \"cover_art_details\")) saved_config_shadow_append_option(out, \"cover_art_details\");\n",
         "    const std::string secondary_entity = saved_config_shadow_trim(cfg_option_value(source, \"cover_art_secondary_entity\"));\n",
         "    if (!secondary_entity.empty()) saved_config_shadow_append_option(out, \"cover_art_secondary_entity\", secondary_entity);\n",
+        "    const std::string speaker_group_entity = saved_config_shadow_trim(cfg_option_value(source, \"speaker_group_entity\"));\n",
+        "    if (!speaker_group_entity.empty()) saved_config_shadow_append_option(out, \"speaker_group_entity\", speaker_group_entity);\n",
+        "    if (max_volume != SAVED_CONFIG_SHADOW_MEDIA_VOLUME_DEFAULT) saved_config_shadow_append_option(out, \"volume_max\", std::to_string(max_volume));\n",
         "  } else if (config.sensor == \"playlist\") {\n",
         "    const std::string content_id = saved_config_shadow_trim(cfg_option_value(source, \"playlist_content_id\"));\n",
         "    const std::string content_type = saved_config_shadow_trim(cfg_option_value(source, \"playlist_content_type\"));\n",
@@ -2981,7 +3073,7 @@ def gen_card_contract_h(data):
         "\n",
         "// =============================================================================\n",
         "// GENERATED CARD CONFIG CONTRACT - do not edit by hand\n",
-        "// Generated by scripts/build.py from common/config/card_contract.json.\n",
+        "// Generated by scripts/build.py from product/v2/card_contract.json.\n",
         "// =============================================================================\n",
         "\n",
         f"constexpr int CARD_CONTRACT_VERSION = {int(data['contractVersion'])};\n",
@@ -3313,7 +3405,7 @@ def generated_card_markdown_header(kind):
     return (
         "<!-- =============================================================================\n"
         f"GENERATED {kind} - do not edit by hand\n"
-        "Generated by scripts/build.py from common/config/card_contract.json.\n"
+        "Generated by scripts/build.py from product/v2/card_contract.json.\n"
         "============================================================================= -->\n\n"
     )
 
@@ -3477,17 +3569,6 @@ def gen_device_grid_snippet(capability):
     rows = capability["grid"]["rows"]
     cols = capability["grid"]["cols"]
     slots = capability["slots"]
-    relays = capability.get("relays", 0)
-    relay_text = "No built-in relays" if relays == 0 else f"{relays} built-in relay" + ("" if relays == 1 else "s")
-    ethernet = "Yes, manual ESPHome install only" if capability.get("ethernetManualInstall") else "No"
-    image_slots = capability["imageSlots"]
-    image_card_types = capability.get("imageCardTypes", [])
-    if image_slots == 0 or not image_card_types:
-        image_slot_text = "Not supported"
-    elif image_card_types == ["media_cover_art"]:
-        image_slot_text = f"Up to {image_slots} Media Cover Art card" + ("" if image_slots == 1 else "s")
-    else:
-        image_slot_text = f"Up to {image_slots} simultaneous Image or Media Cover Art cards"
     if capability.get("subpages", True):
         layout_text = (
             f"The home screen uses a **{rows}-row x {cols}-column** grid, giving you "
@@ -3502,16 +3583,7 @@ def gen_device_grid_snippet(capability):
     return (
         generated_markdown_header("SCREEN GRID CAPABILITIES") +
         layout_text +
-        "Flexible card sizes are supported: Single, Tall, Wide, and Large.\n\n"
-        "| Capability | Value |\n"
-        "|---|---|\n"
-        f"| Screen | {capability['screenSize']}, {capability['resolution']}, {capability['orientation']} |\n"
-        f"| Processor | {capability['chipFamily']} |\n"
-        f"| Built-in relays | {relay_text} |\n"
-        f"| Image-based cards | {image_slot_text} |\n"
-        f"| Rotation support | {'Yes' if capability.get('rotation') else 'No'} |\n"
-        f"| Browser install slug | `{capability['installSlug']}` |\n"
-        f"| Ethernet option | {ethernet} |\n"
+        "Flexible card sizes are supported: Single, Tall, Wide, and Large.\n"
     )
 
 
@@ -3579,6 +3651,90 @@ def load_mdi_codepoints():
             css,
         )
     }
+
+
+def web_mdi_icon_codepoints(data):
+    """Return the complete local glyph map required by the browser editor."""
+    codepoints = {
+        item["mdi"]: item["codepoint"].upper()
+        for item in icon_items(data)
+    }
+    codepoints.update(WEB_FIXED_MDI_ICON_CODEPOINTS)
+    return codepoints
+
+
+def web_mdi_icon_names(data, codepoints):
+    """Return every MDI glyph the browser editor can render.
+
+    The picker gets its names from the Product Model. A smaller set of fixed
+    controls and card badges is written directly in the editor source, so scan
+    those string literals too. Filtering them through the pinned MDI map keeps
+    unrelated UI text out of the font stylesheet.
+    """
+    names = {item["mdi"] for item in icon_items(data)}
+    for path in WEB_SOURCE_DIR.rglob("*.ts"):
+        source = path.read_text(encoding="utf-8")
+        names.update(
+            match.group(1)
+            for match in re.finditer(r"\bmdi-([a-z0-9-]+)\b", source)
+            if match.group(1) in codepoints
+        )
+        names.update(
+            match.group(1)
+            for match in re.finditer(r"['\"]([a-z][a-z0-9-]*)['\"]", source)
+            if match.group(1) in codepoints
+        )
+    return names
+
+
+def embedded_web_mdi_styles():
+    """Build the local interface and icon font CSS used by the browser bundle.
+
+    Browsers receive this as part of www.js, rather than requesting a CDN
+    stylesheet or font after the editor has started. This matters when a display
+    is reachable on the local network but cannot reach the Internet.
+    """
+    if not MDI_WEB_FONT.exists():
+        raise BuildError(f"Missing bundled web icon font: {MDI_WEB_FONT.relative_to(ROOT)}")
+    if not INTER_WEB_FONT.exists():
+        raise BuildError(f"Missing bundled web interface font: {INTER_WEB_FONT.relative_to(ROOT)}")
+    if not ROBOTO_WEB_FONT.exists():
+        raise BuildError(f"Missing bundled web preview font: {ROBOTO_WEB_FONT.relative_to(ROOT)}")
+    if not SUPPORT_BUTTON_IMAGE.exists():
+        raise BuildError(f"Missing bundled support button image: {SUPPORT_BUTTON_IMAGE.relative_to(ROOT)}")
+
+    data = load_json(ICONS_JSON)
+    codepoints = web_mdi_icon_codepoints(data)
+    icon_names = web_mdi_icon_names(data, codepoints)
+    missing = sorted(name for name in icon_names if name not in codepoints)
+    if missing:
+        raise BuildError("Missing MDI codepoints for browser icons: " + ", ".join(missing))
+
+    interface_font_data = base64.b64encode(INTER_WEB_FONT.read_bytes()).decode("ascii")
+    preview_font_data = base64.b64encode(ROBOTO_WEB_FONT.read_bytes()).decode("ascii")
+    support_button_image_data = base64.b64encode(SUPPORT_BUTTON_IMAGE.read_bytes()).decode("ascii")
+    icon_font_data = base64.b64encode(MDI_WEB_FONT.read_bytes()).decode("ascii")
+    css = [
+        "@font-face{font-family:'Roboto';src:url(data:font/woff2;base64,",
+        preview_font_data,
+        ") format('woff2');font-weight:100 900;font-style:normal;font-display:swap}",
+        ".sp-support-link{background:center/contain no-repeat url(data:image/png;base64,",
+        support_button_image_data,
+        ")}",
+        "@font-face{font-family:'Inter';src:url(data:font/woff2;base64,",
+        interface_font_data,
+        ") format('woff2');font-weight:100 900;font-style:normal;font-display:swap}",
+        "@font-face{font-family:'Material Design Icons';src:url(data:font/ttf;base64,",
+        icon_font_data,
+        ") format('truetype');font-weight:normal;font-style:normal;font-display:block}",
+        ".mdi{display:inline-block;font-family:'Material Design Icons';font-weight:normal;font-style:normal;line-height:1;text-rendering:auto;-webkit-font-smoothing:antialiased}",
+        ".mdi::before{display:inline-block}",
+    ]
+    css.extend(
+        f".mdi-{name}::before{{content:'\\{codepoints[name]}'}}"
+        for name in sorted(icon_names)
+    )
+    return "".join(css)
 
 
 def check_duplicate_icon_fields(data):
@@ -3658,6 +3814,23 @@ def validate_icon_data(data):
         elif actual != expected:
             errors.append(f"{item['name']} / mdi-{mdi}: icons.json={actual}, MDI {MDI_VERSION}={expected}")
 
+    for mdi, actual in WEB_FIXED_MDI_ICON_CODEPOINTS.items():
+        expected = mdi_codepoints.get(mdi)
+        if expected is None:
+            errors.append(f"browser fixed icon mdi-{mdi} is missing from MDI {MDI_VERSION}")
+        elif actual != expected:
+            errors.append(
+                f"browser fixed icon mdi-{mdi}: local={actual}, MDI {MDI_VERSION}={expected}"
+            )
+
+    source_icons = web_mdi_icon_names(data, mdi_codepoints)
+    local_icons = web_mdi_icon_codepoints(data)
+    missing_local_icons = sorted(source_icons - local_icons.keys())
+    if missing_local_icons:
+        errors.append(
+            "browser icon codepoint map is missing: " + ", ".join(f"mdi-{name}" for name in missing_local_icons)
+        )
+
     return errors
 
 
@@ -3699,9 +3872,10 @@ def gen_icon_glyphs(data):
 
 def gen_icons_h_entries(data):
     """C++ IconEntry array initializers for icons.h."""
-    max_name_len = max(len(i["name"]) for i in data["icons"])
+    firmware_icons = [*data.get("structural", []), *data["icons"]]
+    max_name_len = max(len(i["name"]) for i in firmware_icons)
     lines = []
-    for icon in data["icons"]:
+    for icon in firmware_icons:
         padded = f'"{icon["name"]}",'
         padded = padded.ljust(max_name_len + 3)
         lines.append(f'    {{{padded} "\\U{icon["codepoint"]:>08s}"}},\n')
@@ -3836,9 +4010,54 @@ def load_timezone_options():
     return options
 
 
-def build_www(check_only=False, output_dir=None, test_hooks=False):
+def load_legacy_web_bundle(manifest_path):
+    path = Path(manifest_path)
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BuildError(f"Could not read legacy web asset manifest {path}") from exc
+    bundles = manifest.get("bundles") if isinstance(manifest, dict) else None
+    if not isinstance(bundles, list):
+        raise BuildError(f"Legacy web asset manifest {path} has no bundle entries")
+    bundle = next(
+        (
+            candidate
+            for candidate in bundles
+            if isinstance(candidate, dict)
+            and isinstance(candidate.get("firmwareVersions"), list)
+            and any(
+                isinstance(version, str) and version != "dev"
+                for version in candidate["firmwareVersions"]
+            )
+        ),
+        None,
+    )
+    if bundle is None:
+        raise BuildError(
+            f"Legacy web asset manifest {path} has no published firmware bundle"
+        )
+    bundle_id = bundle.get("id")
+    bundle_path = bundle.get("path")
+    if (
+        not isinstance(bundle_id, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", bundle_id)
+        or bundle.get("sha256") != bundle_id
+        or bundle_path != f"bundles/{bundle_id}/www.js"
+    ):
+        raise BuildError(f"Legacy web asset manifest {path} has an invalid current bundle")
+    return bundle_id, bundle_path
+
+
+def build_www(
+    check_only=False,
+    output_dir=None,
+    test_hooks=False,
+    retain_current_bundle=False,
+    legacy_web_manifest=None,
+):
     """Build one shared www.js containing the validated device profiles."""
     devices = build_web_devices()
+    embedded_mdi_styles = embedded_web_mdi_styles()
     temporary_root = None
     if output_dir is None:
         temporary_root = tempfile.TemporaryDirectory(prefix="espcontrol-www-")
@@ -3852,6 +4071,7 @@ def build_www(check_only=False, output_dir=None, test_hooks=False):
         input=json.dumps({
             "outputDir": str(build_root),
             "devices": devices,
+            "embeddedMdiStyles": embedded_mdi_styles,
             "testHooks": test_hooks,
             "overlays": GENERATED_TRANSACTION.overlays() if GENERATED_TRANSACTION is not None else {},
         }),
@@ -3864,25 +4084,115 @@ def build_www(check_only=False, output_dir=None, test_hooks=False):
             temporary_root.cleanup()
         raise BuildError(result.stderr.strip() or "esbuild failed while building web bundles")
 
-    if output_dir is not None:
-        print(f"Built shared www.js bundle and {len(devices)} compatibility loader(s) in {build_root}")
-        return []
+    bundle_text = (build_root / "app.js").read_text()
+    embedded_text = (build_root / "embedded.js").read_text()
+    bridge_text = (build_root / "www.js").read_text()
+    bundle_sha256 = hashlib.sha256(bundle_text.encode("utf-8")).hexdigest()
+    bundle_relative_path = Path("bundles") / bundle_sha256 / "www.js"
+    legacy_bundle_id = WEB_ASSET_LEGACY_BUNDLE_ID
+    legacy_bundle_path = WEB_ASSET_LEGACY_BUNDLE_PATH
+    if legacy_web_manifest is not None:
+        legacy_bundle_id, legacy_bundle_path = load_legacy_web_bundle(legacy_web_manifest)
+    current_firmware_versions = ["dev"]
+    if WEB_ASSET_CURRENT_FIRMWARE_VERSION is not None:
+        if WEB_ASSET_CURRENT_FIRMWARE_VERSION not in WEB_ASSET_SUPPORTED_FIRMWARE_VERSIONS:
+            raise BuildError(
+                "current web asset firmware version is missing from the supported version list"
+            )
+        current_firmware_versions.append(WEB_ASSET_CURRENT_FIRMWARE_VERSION)
+    legacy_firmware_versions = [
+        firmware_version
+        for firmware_version in WEB_ASSET_SUPPORTED_FIRMWARE_VERSIONS
+        if firmware_version not in current_firmware_versions
+    ]
+    current_bundle = {
+        "id": bundle_sha256,
+        "sha256": bundle_sha256,
+        "path": bundle_relative_path.as_posix(),
+        "deviceProfiles": list(devices),
+        "firmwareVersions": current_firmware_versions,
+    }
+    legacy_bundle = {
+        "id": legacy_bundle_id,
+        "sha256": legacy_bundle_id,
+        "path": legacy_bundle_path,
+        "deviceProfiles": list(devices),
+        "firmwareVersions": legacy_firmware_versions,
+    }
+    manifest_text = json.dumps({
+        "schemaVersion": 1,
+        "bundles": [
+            {**current_bundle, "webAssetVersion": 2},
+            {**current_bundle, "webAssetVersion": 1},
+            {**legacy_bundle, "webAssetVersion": 2},
+            {**legacy_bundle, "webAssetVersion": 1},
+        ],
+    }, indent=2) + "\n"
 
-    outputs = [(WWW_OUTPUT_DIR / "www.js", (build_root / "www.js").read_text())]
+    outputs = [(build_root / "www.js", bridge_text)]
     outputs.extend(
-        (WWW_OUTPUT_DIR / slug / "www.js", (build_root / slug / "www.js").read_text())
+        (build_root / slug / "www.js", (build_root / slug / "www.js").read_text())
         for slug in devices
     )
+    outputs.extend([
+        (build_root / "embedded" / "www.js", embedded_text),
+        (build_root / bundle_relative_path, bundle_text),
+        (build_root / "web-assets.json", manifest_text),
+    ])
+
+    output_root = build_root if output_dir is not None else WWW_OUTPUT_DIR
+    if retain_current_bundle and output_dir is None:
+        retention = {"schemaVersion": 1, "paths": []}
+        if WEB_BUNDLE_RETENTION.exists():
+            retention = json.loads(WEB_BUNDLE_RETENTION.read_text(encoding="utf-8"))
+        paths = list(dict.fromkeys([*retention.get("paths", []), bundle_relative_path.as_posix()]))
+        outputs.append((
+            build_root / "bundle-retention.json",
+            json.dumps({"schemaVersion": 1, "paths": sorted(paths)}, indent=2) + "\n",
+        ))
+
+    retained = {entry["path"] for entry in json.loads(manifest_text)["bundles"]}
+    if output_dir is None and WEB_BUNDLE_RETENTION.exists():
+        retention = json.loads(WEB_BUNDLE_RETENTION.read_text(encoding="utf-8"))
+        retained.update(retention.get("paths", []))
+    stale = sorted(
+        path for path in (output_root / "bundles").glob("*/www.js")
+        if path.relative_to(output_root).as_posix() not in retained
+    )
+
+    if output_dir is not None:
+        for path, generated in outputs:
+            if not path.exists() or path.read_text() != generated:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(generated, encoding="utf-8")
+        for path in stale:
+            path.unlink()
+        print(f"Built shared www.js bundle, immutable asset, and {len(devices)} compatibility loader(s) in {build_root}")
+        return []
+
+    outputs = [
+        (WWW_OUTPUT_DIR / path.relative_to(build_root), generated)
+        for path, generated in outputs
+    ]
     dirty = [
         str(path.relative_to(WWW_OUTPUT_DIR))
         for path, generated in outputs
         if not path.exists() or path.read_text() != generated
     ]
 
+    dirty.extend(str(path.relative_to(WWW_OUTPUT_DIR)) for path in stale)
+
     if not check_only:
         for path, generated in outputs:
             if not path.exists() or path.read_text() != generated:
                 write_generated_text(path, generated)
+
+        # Publish the replacement manifest before removing its obsolete assets.
+        for path in stale:
+            if GENERATED_TRANSACTION is None:
+                path.unlink()
+            else:
+                GENERATED_TRANSACTION.stage_delete(path)
 
     if check_only and dirty:
         print("www.js outputs are out of date. Run 'python scripts/build.py www' to fix:")
@@ -3910,6 +4220,15 @@ def main():
     check_only = "--check" in args
     test_hooks = "--test-hooks" in args
     args = [arg for arg in args if arg != "--test-hooks"]
+    retain_current_bundle = "--retain-current-bundle" in args
+    args = [arg for arg in args if arg != "--retain-current-bundle"]
+    legacy_web_manifest = None
+    if "--legacy-web-manifest" in args:
+        index = args.index("--legacy-web-manifest")
+        if index + 1 >= len(args):
+            raise BuildError("--legacy-web-manifest requires a manifest path")
+        legacy_web_manifest = args[index + 1]
+        del args[index:index + 2]
     temporary_output = None
     if "--temporary-output" in args:
         index = args.index("--temporary-output")
@@ -3936,7 +4255,11 @@ def main():
                 contract_dirty = sync_card_contract(check_only=check_only)
                 device_dirty = sync_device_capabilities(check_only=check_only)
                 icon_dirty = sync_icons(check_only=check_only)
-                www_dirty = build_www(check_only=check_only)
+                www_dirty = build_www(
+                    check_only=check_only,
+                    retain_current_bundle=retain_current_bundle,
+                    legacy_web_manifest=legacy_web_manifest,
+                )
                 if check_only and (entity_dirty or i18n_dirty or contract_dirty or device_dirty or icon_dirty or www_dirty):
                     exit_code = 1
                 elif not entity_dirty and not i18n_dirty and not contract_dirty and not device_dirty and not icon_dirty and not www_dirty:
@@ -3988,7 +4311,13 @@ def main():
                 else:
                     print(f"Synced {len(dirty)} device capability output(s).")
             elif cmd == "www":
-                dirty = build_www(check_only=check_only, output_dir=temporary_output, test_hooks=test_hooks)
+                dirty = build_www(
+                    check_only=check_only,
+                    output_dir=temporary_output,
+                    test_hooks=test_hooks,
+                    retain_current_bundle=retain_current_bundle,
+                    legacy_web_manifest=legacy_web_manifest,
+                )
                 if check_only and dirty:
                     exit_code = 1
                 elif not dirty:
@@ -3997,7 +4326,11 @@ def main():
                     print(f"Built {len(dirty)} file(s).")
             else:
                 print(f"Unknown command: {cmd}")
-                print("Usage: python scripts/build.py [all|entities|contract|devices|icons|i18n|www] [--check]")
+                print(
+                    "Usage: python scripts/build.py "
+                    "[all|entities|contract|devices|icons|i18n|www] [--check] "
+                    "[--retain-current-bundle] [--legacy-web-manifest PATH]"
+                )
                 exit_code = 1
         if exit_code == 0 and transaction is not None:
             transaction.commit()

@@ -1,5 +1,5 @@
 ---
-title: EspControl Screen Schedule
+title: "Screen Schedule"
 description:
   How to control what the EspControl panel does overnight.
 ---
@@ -8,12 +8,12 @@ description:
 
 Screen schedule controls what the panel does overnight, then returns it to normal when the schedule says it should be available again.
 
-You will find it in the **Settings** tab on the [Setup](/features/setup) page, under **Night Schedule**.
+You will find it in **Settings > Sleep & Schedule > Night Schedule** on the [Setup](/features/setup) page.
 
 ## Settings
 
 - **Mode** - choose **Disabled**, **Time**, or **Sensor**. Time uses the daytime and night-time hours. Sensor uses the configured sensor entity and activation state.
-- **Sensor Entity** - shown only for **Sensor**. Choose the Home Assistant binary sensor, sensor, or `input_boolean` that controls the schedule.
+- **Sensor Entity** - shown only for **Sensor**. Choose the Home Assistant binary sensor, sensor, or `input_boolean` that controls the schedule. This is separate from the Screensaver **Presence Entity**, so each feature can follow a different sensor.
 - **Activate Night Schedule When** - shown only for **Sensor**. Choose **Sensor Is Off** (the default) or **Sensor Is On**. The selected state applies the night-time action; the opposite state returns the panel to normal mode.
 - **Daytime** - the first hour when the screen should be awake. The default is **6:00 AM**.
 - **Night Time** - the first hour when the night schedule starts. The default is **11:00 PM**.
@@ -22,13 +22,19 @@ You will find it in the **Settings** tab on the [Setup](/features/setup) page, u
 - **When Woken, Screen Brightness** - shown only for **Screen Off**. It controls the brightness used for a temporary wake during scheduled-off hours. The default is **10%**.
 - **Dimmed Screen Brightness** - shown only for **Screen Dimmed**. It controls the overnight brightness while the panel stays usable. The default is **10%**.
 - **Clock Brightness** - shown only for **Clock**. It controls the backlight level used by the overnight clock. The default is **10%**.
-- **Clock Text Color** - shown only for **Clock**. It controls the colour of the overnight schedule clock text.
+- **Clock Text Colour** - shown only for **Clock**. It controls the colour of the overnight schedule clock text.
 
 Time and Sensor modes share the same night-time action and brightness settings. Switching between them keeps those settings, including the sensor activation choice.
 
+## Updating an Existing Panel
+
+When a panel first starts this firmware version, its existing Screensaver **Presence Entity** is copied into the new **Screen Schedule Sensor Entity** setting. This keeps its previous setup working straight away. After that first copy, the two settings are independent: changing one never changes the other. Backups made before this setting existed use the same compatibility copy when imported.
+
 When the schedule is disabled, the panel uses the normal [screensaver](/features/screensaver) and [backlight](/features/backlight) rules.
 
-Time-based Night Schedule has priority over screensaver presence wake while night time is active. If someone walks past during scheduled night time, the normal screensaver sensor does not wake the panel; touch and the panel's **Screen: Wake** button in Home Assistant still work. To make presence control night and daytime behavior, use **Sensor** mode for Night Schedule instead.
+To see at a glance when the night period is active, turn on **Show Night Mode Icon** in [Clock Bar](/features/clock-bar). A moon appears beside the connectivity icon for as long as the night schedule is running, in both **Time** and **Sensor** mode.
+
+Time-based Night Schedule has priority over screensaver presence wake and media cover art while night time is active. If someone walks past during scheduled night time, the normal screensaver sensor does not wake the panel; touch and the panel's **Screen: Wake** button in Home Assistant still work. To make presence control night and daytime behavior, use **Sensor** mode for Night Schedule instead.
 
 ## How the Times Work
 
@@ -48,4 +54,4 @@ Pressing and holding a button on the touchscreen for 3 seconds puts the screen t
 
 ## Brightness
 
-Screen schedule works alongside the daytime and nighttime brightness settings. When the screen is awake during scheduled-on hours, brightness follows the calculated sunrise and sunset for your selected timezone, or the manual Dawn and Dusk times when **Automatic Brightness** is off. **Screen Dimmed** uses its own overnight brightness setting. **Screen Off** turns the physical backlight off and can run invisible burn-in protection while dark, while **Clock** uses its own clock brightness and text colour settings.
+Screen schedule works alongside the selected **Brightness Mode**. During scheduled-on hours, **Manual** restores the saved manual level, **Automatic** uses calculated local solar times, and **Timed** uses the saved Dawn and Dusk times. **Screen Dimmed** uses its own overnight brightness setting. **Screen Off** turns the physical backlight off and can run invisible burn-in protection while dark, while **Clock** uses its own clock brightness and text colour settings.

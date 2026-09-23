@@ -123,6 +123,14 @@ class JPEGFormat(Format):
                 shutil.rmtree(dest_path)
             shutil.copytree(src_path, dest_path)
 
+        if CORE.using_toolchain_esp_idf:
+            # Native ESP-IDF builds compile artwork_image as part of the
+            # generated src component. Register the copied decoder as a local
+            # IDF dependency so its headers and library are available there.
+            from esphome.components.esp32 import add_idf_component
+
+            add_idf_component(name="libjpeg-turbo-esp32", path=dest_path)
+
 
 class BMPFormat(Format):
     def __init__(self):
@@ -292,6 +300,18 @@ async def artwork_image_action_to_code(config, action_id, template_arg, args):
 async def to_code(config):
     image_format = IMAGE_FORMATS[config[CONF_FORMAT]]
     image_format.actions()
+    try:
+        from esphome.core import CORE
+
+        if CORE.is_esp32 and not CORE.using_arduino:
+            # The S3 background transfer attaches ESP-IDF's certificate bundle
+            # for every public HTTPS request, even when local TLS is explicitly
+            # permitted to use the separate insecure path below.
+            esp32.add_idf_sdkconfig_option(
+                "CONFIG_MBEDTLS_CERTIFICATE_BUNDLE", True
+            )
+    except Exception as err:
+        _LOGGER.debug("Could not enable the ESP-IDF certificate bundle: %s", err)
     if config[CONF_ALLOW_INSECURE_LOCAL_URLS]:
         cg.add_define("USE_ARTWORK_IMAGE_INSECURE_LOCAL_URLS")
         try:

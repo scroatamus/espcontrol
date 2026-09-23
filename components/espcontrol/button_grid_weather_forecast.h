@@ -85,8 +85,42 @@ inline const char* weather_icon_for_state(const std::string &state) {
   return find_icon("Weather Cloudy Alert");
 }
 
+inline bool weather_state_has_localized_label(const std::string &state) {
+  std::string value = trim_display_unit(state);
+  for (char &ch : value) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  const std::string normalized = normalize_weather_state(state);
+  return value == normalized &&
+         (normalized == "sunny" || normalized == "clear-night" ||
+          normalized == "partlycloudy" || normalized == "cloudy" ||
+          normalized == "cloudy-alert" || normalized == "dust" ||
+          normalized == "fog" || normalized == "hail" || normalized == "hazy" ||
+          normalized == "hurricane" || normalized == "lightning" ||
+          normalized == "lightning-rainy" || normalized == "night-partly-cloudy" ||
+          normalized == "partly-lightning" || normalized == "partly-rainy" ||
+          normalized == "partly-snowy" || normalized == "partly-snowy-rainy" ||
+          normalized == "pouring" || normalized == "rainy" || normalized == "snowy" ||
+          normalized == "snowy-heavy" || normalized == "snowy-rainy" ||
+          normalized == "sunny-alert" || normalized == "sunset" ||
+          normalized == "sunset-down" || normalized == "sunset-up" ||
+          normalized == "tornado" || normalized == "windy" ||
+          normalized == "windy-variant" || normalized == "exceptional");
+}
+
 inline std::string weather_label_for_state(const std::string &state) {
   std::string normalized = normalize_weather_state(state);
+  std::string value = trim_display_unit(state);
+  for (char &ch : value) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  if (value == "unknown") return espcontrol_i18n(std::string("Unknown"));
+  if (value == "unavailable" || value.empty()) {
+    return espcontrol_i18n(std::string("Unavailable"));
+  }
+  if (!weather_state_has_localized_label(state)) {
+    return sentence_cap_text(trim_display_unit(state));
+  }
   if (normalized == "sunny") return espcontrol_i18n(std::string("Sunny"));
   if (normalized == "clear-night") return espcontrol_i18n(std::string("Clear Night"));
   if (normalized == "partlycloudy") return espcontrol_i18n(std::string("Partly Cloudy"));
@@ -230,13 +264,13 @@ inline void apply_weather_forecast_card_text(const WeatherForecastCardRef &ref,
       : (ref.label.empty()
           ? (ref.day == "today" ? espcontrol_i18n(std::string("Today")) : espcontrol_i18n(std::string("Tomorrow")))
           : ref.label);
-    lv_label_set_text(ref.label_lbl, label.c_str());
+    lv_label_set_display_text(ref.label_lbl, label.c_str());
   }
   if (!ref.value_lbl || !ref.unit_lbl) return;
   if (!valid) {
-    lv_label_set_text(ref.value_lbl, "--/--");
+    lv_label_set_display_text(ref.value_lbl, "--/--");
     std::string normalized_unit = weather_forecast_unit_symbol(unit);
-    lv_label_set_text(ref.unit_lbl, normalized_unit.c_str());
+    lv_label_set_display_text(ref.unit_lbl, normalized_unit.c_str());
     return;
   }
   char buf[24];
@@ -247,9 +281,9 @@ inline void apply_weather_forecast_card_text(const WeatherForecastCardRef &ref,
   if (low == WEATHER_FORECAST_TEMP_MISSING) snprintf(low_buf, sizeof(low_buf), "--");
   else snprintf(low_buf, sizeof(low_buf), "%d", weather_forecast_display_temp(low, unit));
   snprintf(buf, sizeof(buf), "%s/%s", high_buf, low_buf);
-  lv_label_set_text(ref.value_lbl, buf);
+  lv_label_set_display_text(ref.value_lbl, buf);
   std::string normalized_unit = weather_forecast_unit_symbol(unit);
-  lv_label_set_text(ref.unit_lbl, normalized_unit.c_str());
+  lv_label_set_display_text(ref.unit_lbl, normalized_unit.c_str());
 }
 
 inline bool weather_forecast_card_ref_ready(const WeatherForecastCardRef &ref) {

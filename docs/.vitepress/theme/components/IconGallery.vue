@@ -27,7 +27,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import iconsData from '../../../../common/assets/icons.json'
+import { iconOptions, iconSlug } from '../../../../src/webserver/application/ui_primitives'
 
 const GROUP_ORDER = [
   'Lighting',
@@ -48,36 +48,52 @@ const GROUP_ORDER = [
 
 const ICON_GROUPS = {
   'Ceiling Light': 'Lighting',
+  'Ceiling Light Multiple Outline': 'Lighting',
   'Ceiling Lights Multiple': 'Lighting',
   'Chandelier': 'Lighting',
+  'Coach Lamp': 'Lighting',
+  'Coach Lamp Variant': 'Lighting',
   'Desk Lamp': 'Lighting',
+  'Desk Lamp Off': 'Lighting',
+  'Desk Lamp On': 'Lighting',
   'Downlight': 'Lighting',
   'Floor Lamp': 'Lighting',
   'Flood Light Down': 'Lighting',
   'Lamp': 'Lighting',
   'Lamp Outline': 'Lighting',
+  'Lava Lamp': 'Lighting',
   'LED Strip': 'Lighting',
   'LED Strip Variant': 'Lighting',
   'LED Strip Variant Off': 'Lighting',
   'Light Switch': 'Lighting',
   'Lightbulb': 'Lighting',
+  'Lightbulb Auto': 'Lighting',
+  'Lightbulb Auto Outline': 'Lighting',
+  'Lightbulb Fluorescent Tube Outline': 'Lighting',
   'Lightbulb Group': 'Lighting',
   'Lightbulb Group Outline': 'Lighting',
   'Lightbulb Night': 'Lighting',
   'Lightbulb Night Outline': 'Lighting',
   'Lightbulb Off': 'Lighting',
+  'Lightbulb On 50': 'Lighting',
   'Lightbulb On Outline': 'Lighting',
   'Lightbulb Outline': 'Lighting',
   'Lightbulb Spot': 'Lighting',
   'Lightbulb Spot Off': 'Lighting',
   'Lightbulb Variant': 'Lighting',
   'Lightbulb Variant Outline': 'Lighting',
+  'Home Lightbulb': 'Lighting',
+  'Home Lightbulb Outline': 'Lighting',
   'Outdoor Lamp': 'Lighting',
   'Palette': 'Lighting',
+  'Post Lamp': 'Lighting',
   'Spotlight': 'Lighting',
   'Spotlight Beam': 'Lighting',
   'String Lights': 'Lighting',
   'String Lights Off': 'Lighting',
+  'Track Light': 'Lighting',
+  'Track Light Off': 'Lighting',
+  'Vanity Light': 'Lighting',
   'Wall Sconce': 'Lighting',
 
   'Air Conditioner': 'Climate & Air',
@@ -85,6 +101,7 @@ const ICON_GROUPS = {
   'Air Purifier': 'Climate & Air',
   'Air Purifier Off': 'Climate & Air',
   'Ceiling Fan': 'Climate & Air',
+  'Ceiling Fan Light': 'Climate & Air',
   'Fan': 'Climate & Air',
   'Fan Auto': 'Climate & Air',
   'Fan Off': 'Climate & Air',
@@ -118,6 +135,8 @@ const ICON_GROUPS = {
   'Arrow Up Down': 'Climate & Air',
   'Swap Horizontal': 'Climate & Air',
 
+  'Awning': 'Covers & Shading',
+  'Awning Outline': 'Covers & Shading',
   'Blinds': 'Covers & Shading',
   'Blinds Horizontal': 'Covers & Shading',
   'Blinds Horizontal Closed': 'Covers & Shading',
@@ -141,6 +160,8 @@ const ICON_GROUPS = {
   'Window Shutter Open': 'Covers & Shading',
 
   'Alarm': 'Security & Access',
+  'Alarm Bell': 'Security & Access',
+  'Alarm Clock': 'Security & Access',
   'Alarm Light': 'Security & Access',
   'Bell': 'Security & Access',
   'Camera': 'Security & Access',
@@ -158,6 +179,7 @@ const ICON_GROUPS = {
   'Lock': 'Security & Access',
   'Lock Open': 'Security & Access',
   'Lock Open Outline': 'Security & Access',
+  'Lock Open Variant': 'Security & Access',
   'Lock Outline': 'Security & Access',
   'Motion Sensor': 'Security & Access',
   'Motion Sensor Off': 'Security & Access',
@@ -249,6 +271,7 @@ const ICON_GROUPS = {
   'Weather Windy Variant': 'Weather',
 
   'Coffee Maker': 'Appliances',
+  'Countertop': 'Appliances',
   'Dishwasher': 'Appliances',
   'Dishwasher Off': 'Appliances',
   'Dryer': 'Appliances',
@@ -261,6 +284,7 @@ const ICON_GROUPS = {
   'Washing Machine': 'Appliances',
   'Washing Machine Off': 'Appliances',
   'Silverware': 'Appliances',
+  'Chef Hat': 'Appliances',
 
   'Cast': 'Media & Entertainment',
   'Folder Music Outline': 'Media & Entertainment',
@@ -285,15 +309,20 @@ const ICON_GROUPS = {
   'Projector': 'Media & Entertainment',
   'Projector Off': 'Media & Entertainment',
   'Remote Back': 'Media & Entertainment',
+  'Remote Desktop': 'Media & Entertainment',
   'Remote Down': 'Media & Entertainment',
   'Remote Home': 'Media & Entertainment',
   'Remote Left': 'Media & Entertainment',
   'Remote OK': 'Media & Entertainment',
   'Remote Right': 'Media & Entertainment',
   'Remote Up': 'Media & Entertainment',
+  'Remote TV': 'Media & Entertainment',
   'Speaker': 'Media & Entertainment',
+  'Speaker Multiple': 'Media & Entertainment',
+  'Speaker Off': 'Media & Entertainment',
   'Speaker Pause': 'Media & Entertainment',
   'Speaker Play': 'Media & Entertainment',
+  'Speaker Wireless': 'Media & Entertainment',
   'Skip Next': 'Media & Entertainment',
   'Skip Previous': 'Media & Entertainment',
   'Television': 'Media & Entertainment',
@@ -309,11 +338,14 @@ const ICON_GROUPS = {
   'Pool': 'Water & Outdoors',
   'Shower': 'Water & Outdoors',
   'Sprinkler': 'Water & Outdoors',
+  'Sprinkler Variant': 'Water & Outdoors',
   'Water': 'Water & Outdoors',
   'Water Alert': 'Water & Outdoors',
   'Water Boiler': 'Water & Outdoors',
   'Water Boiler Off': 'Water & Outdoors',
   'Water Percent': 'Water & Outdoors',
+  'Water Pump': 'Water & Outdoors',
+  'Water Pump Off': 'Water & Outdoors',
   'Shower Head': 'Water & Outdoors',
 
   'Application': 'Network & Tech',
@@ -331,10 +363,12 @@ const ICON_GROUPS = {
   'Robot Vacuum Variant Off': 'Network & Tech',
   'Router': 'Network & Tech',
   'Router Network': 'Network & Tech',
+  'Wifi': 'Network & Tech',
   'Vacuum': 'Network & Tech',
   'Vacuum Outline': 'Network & Tech',
 
   'Bathtub': 'Rooms & Furniture',
+  'Bathtub Outline': 'Rooms & Furniture',
   'Bed': 'Rooms & Furniture',
   'Bed King': 'Rooms & Furniture',
   'Bed Queen': 'Rooms & Furniture',
@@ -342,10 +376,12 @@ const ICON_GROUPS = {
   'Desk': 'Rooms & Furniture',
   'Sofa': 'Rooms & Furniture',
   'Sofa Outline': 'Rooms & Furniture',
+  'Sofa Single Outline': 'Rooms & Furniture',
   'Stove': 'Rooms & Furniture',
   'Table': 'Rooms & Furniture',
   'Table Chair': 'Rooms & Furniture',
   'Toilet': 'Rooms & Furniture',
+  'Toy Brick': 'Rooms & Furniture',
 
   'Car Electric': 'Vehicles',
   'EV Charger': 'Vehicles',
@@ -357,6 +393,7 @@ const ICON_GROUPS = {
   'Pill Multiple': 'Health',
 
   'Account': 'General',
+  'Auto': 'General',
   'Bird': 'General',
   'Broom': 'General',
   'Cat': 'General',
@@ -366,6 +403,7 @@ const ICON_GROUPS = {
   'Delete': 'General',
   'Delete Empty': 'General',
   'Delete Outline': 'General',
+  'Delete Variant': 'General',
   'Dog': 'General',
   'Dots Horizontal': 'General',
   'Gesture Tap': 'General',
@@ -380,9 +418,11 @@ const ICON_GROUPS = {
   'Timer': 'General',
   'Trash Can': 'General',
   'Trash Can Outline': 'General',
+  'Video': 'Media & Entertainment',
+  'Video Outline': 'Media & Entertainment',
 }
 
-const icons = iconsData.icons
+const icons = iconOptions.map(name => ({ name, mdi: iconSlug(name) }))
 const search = ref('')
 const copiedName = ref(null)
 let copyTimer = null

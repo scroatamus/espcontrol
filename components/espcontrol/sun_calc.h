@@ -175,36 +175,14 @@ inline bool timezone_is_homeassistant_auto(const std::string &tz_option) {
 }
 
 // Morocco pauses UTC+1 during Ramadan. POSIX TZ strings cannot represent these
-// lunar-calendar transitions, so keep the known UTC transition windows explicit.
+// lunar-calendar transitions, or the country's switch to permanent UTC on 20
+// September 2026, so keep the known UTC transition windows explicit. The
+// permanent-UTC transition is 02:00 local time, or 01:00 UTC.
 static const TzUtcRange CASABLANCA_UTC_PAUSES[] = {
   {{2024, 3, 10, 2, 0}, {2024, 4, 14, 2, 0}},
   {{2025, 2, 23, 2, 0}, {2025, 4, 6, 2, 0}},
   {{2026, 2, 15, 2, 0}, {2026, 3, 22, 2, 0}},
-  {{2027, 2, 7, 2, 0}, {2027, 3, 14, 2, 0}},
-  {{2028, 1, 23, 2, 0}, {2028, 3, 5, 2, 0}},
-  {{2029, 1, 14, 2, 0}, {2029, 2, 18, 2, 0}},
-  {{2029, 12, 30, 2, 0}, {2030, 2, 10, 2, 0}},
-  {{2030, 12, 22, 2, 0}, {2031, 1, 26, 2, 0}},
-  {{2031, 12, 14, 2, 0}, {2032, 1, 18, 2, 0}},
-  {{2032, 11, 28, 2, 0}, {2033, 1, 9, 2, 0}},
-  {{2033, 11, 20, 2, 0}, {2033, 12, 25, 2, 0}},
-  {{2034, 11, 5, 2, 0}, {2034, 12, 17, 2, 0}},
-  {{2035, 10, 28, 2, 0}, {2035, 12, 9, 2, 0}},
-  {{2036, 10, 19, 2, 0}, {2036, 11, 23, 2, 0}},
-  {{2037, 10, 4, 2, 0}, {2037, 11, 15, 2, 0}},
-  {{2038, 9, 26, 2, 0}, {2038, 10, 31, 2, 0}},
-  {{2039, 9, 18, 2, 0}, {2039, 10, 23, 2, 0}},
-  {{2040, 9, 2, 2, 0}, {2040, 10, 14, 2, 0}},
-  {{2041, 8, 25, 2, 0}, {2041, 9, 29, 2, 0}},
-  {{2042, 8, 10, 2, 0}, {2042, 9, 21, 2, 0}},
-  {{2043, 8, 2, 2, 0}, {2043, 9, 13, 2, 0}},
-  {{2044, 7, 24, 2, 0}, {2044, 8, 28, 2, 0}},
-  {{2045, 7, 9, 2, 0}, {2045, 8, 20, 2, 0}},
-  {{2046, 7, 1, 2, 0}, {2046, 8, 5, 2, 0}},
-  {{2047, 6, 23, 2, 0}, {2047, 7, 28, 2, 0}},
-  {{2048, 6, 7, 2, 0}, {2048, 7, 19, 2, 0}},
-  {{2049, 5, 30, 2, 0}, {2049, 7, 4, 2, 0}},
-  {{2050, 5, 15, 2, 0}, {2050, 6, 26, 2, 0}},
+  {{2026, 9, 20, 1, 0}, {2051, 1, 1, 0, 0}},
 };
 
 static constexpr int CASABLANCA_UTC_PAUSE_COUNT =
@@ -271,9 +249,16 @@ inline const char* current_posix_tz(const std::string &tz_id) {
   return resolve_posix_tz_at_utc(tz_id, utc_point_from_tm(utc_tm));
 }
 
+#if defined(USE_TIME_TIMEZONE)
+inline bool set_global_timezone_from_posix(const char *posix);
+#endif
+
 inline const char* apply_timezone(const std::string &tz_option) {
   std::string tz_id = timezone_id_from_option(tz_option);
   const char* posix = current_posix_tz(tz_id);
+#if defined(USE_TIME_TIMEZONE)
+  set_global_timezone_from_posix(posix);
+#endif
   setenv("TZ", posix, 1);
   tzset();
   return posix;
@@ -285,29 +270,7 @@ inline const char* apply_configured_timezone(const std::string &tz_option) {
 }
 
 #if defined(USE_TIME_TIMEZONE)
-inline bool timezone_dst_rule_equal(const esphome::time::DSTRule &a,
-                                    const esphome::time::DSTRule &b) {
-  return a.time_seconds == b.time_seconds &&
-         a.day == b.day &&
-         a.type == b.type &&
-         a.month == b.month &&
-         a.week == b.week &&
-         a.day_of_week == b.day_of_week;
-}
-
-inline bool parsed_timezone_equal(const esphome::time::ParsedTimezone &a,
-                                  const esphome::time::ParsedTimezone &b) {
-  return a.std_offset_seconds == b.std_offset_seconds &&
-         a.dst_offset_seconds == b.dst_offset_seconds &&
-         timezone_dst_rule_equal(a.dst_start, b.dst_start) &&
-         timezone_dst_rule_equal(a.dst_end, b.dst_end);
-}
-
-inline bool posix_timezone_matches_global(const char *posix) {
-  esphome::time::ParsedTimezone parsed{};
-  if (!esphome::time::parse_posix_tz(posix, parsed)) return false;
-  return parsed_timezone_equal(parsed, esphome::time::get_global_tz());
-}
+inline bool posix_timezone_matches_global(const char *posix);
 #endif
 
 inline std::string effective_timezone_option(const std::string &tz_option) {
@@ -425,6 +388,68 @@ inline bool parse_posix_tz_rule(const char *posix,
   has_dst = true;
   return true;
 }
+
+#if defined(USE_TIME_TIMEZONE)
+inline bool set_global_timezone_from_posix(const char *posix) {
+  int std_offset_seconds = 0;
+  int dst_offset_seconds = 0;
+  bool has_dst = false;
+  TzPosixTransitionRule start_rule = {};
+  TzPosixTransitionRule end_rule = {};
+  if (!parse_posix_tz_rule(posix, std_offset_seconds, has_dst,
+                           dst_offset_seconds, start_rule, end_rule)) {
+    return false;
+  }
+
+  esphome::time::ParsedTimezone parsed{};
+  parsed.std_offset_seconds = std_offset_seconds;
+  parsed.dst_offset_seconds = dst_offset_seconds;
+  if (has_dst) {
+    parsed.dst_start.time_seconds = start_rule.seconds;
+    parsed.dst_start.type = esphome::time::DSTRuleType::MONTH_WEEK_DAY;
+    parsed.dst_start.month = start_rule.month;
+    parsed.dst_start.week = start_rule.week;
+    parsed.dst_start.day_of_week = start_rule.day;
+    parsed.dst_end.time_seconds = end_rule.seconds;
+    parsed.dst_end.type = esphome::time::DSTRuleType::MONTH_WEEK_DAY;
+    parsed.dst_end.month = end_rule.month;
+    parsed.dst_end.week = end_rule.week;
+    parsed.dst_end.day_of_week = end_rule.day;
+  }
+  esphome::time::set_global_tz(parsed);
+  return true;
+}
+
+inline bool posix_timezone_matches_global(const char *posix) {
+  int std_offset_seconds = 0;
+  int dst_offset_seconds = 0;
+  bool has_dst = false;
+  TzPosixTransitionRule start_rule = {};
+  TzPosixTransitionRule end_rule = {};
+  if (!parse_posix_tz_rule(posix, std_offset_seconds, has_dst,
+                           dst_offset_seconds, start_rule, end_rule)) {
+    return false;
+  }
+
+  const auto &global = esphome::time::get_global_tz();
+  if (global.std_offset_seconds != std_offset_seconds ||
+      global.dst_offset_seconds != dst_offset_seconds ||
+      global.dst_start.type != (has_dst ? esphome::time::DSTRuleType::MONTH_WEEK_DAY
+                                        : esphome::time::DSTRuleType::NONE)) {
+    return false;
+  }
+  if (!has_dst) return true;
+
+  return global.dst_start.time_seconds == start_rule.seconds &&
+         global.dst_start.month == start_rule.month &&
+         global.dst_start.week == start_rule.week &&
+         global.dst_start.day_of_week == start_rule.day &&
+         global.dst_end.time_seconds == end_rule.seconds &&
+         global.dst_end.month == end_rule.month &&
+         global.dst_end.week == end_rule.week &&
+         global.dst_end.day_of_week == end_rule.day;
+}
+#endif
 
 inline bool tz_is_leap_year(int year) {
   return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);

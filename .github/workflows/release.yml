@@ -54,6 +54,40 @@ jobs:
         with:
           node-version: 24
 
+      - name: Prepare Python test environment
+        shell: bash
+        run: |
+          PYTHON_VENV="${RUNNER_TEMP}/espcontrol-release-python"
+          python3 -m venv "${PYTHON_VENV}"
+          "${PYTHON_VENV}/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
+            "PyYAML==6.0.2"
+          PYTHON_SITE_PACKAGES="$("${PYTHON_VENV}/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
+          echo "PATH=${PYTHON_VENV}/bin:${PATH}" >> "${GITHUB_ENV}"
+          echo "PYTHONPATH=${PYTHON_SITE_PACKAGES}:${PYTHONPATH}" >> "${GITHUB_ENV}"
+          echo "${PYTHON_VENV}/bin" >> "${GITHUB_PATH}"
+
+      - name: Ensure CMake is available
+        shell: bash
+        run: |
+          if command -v cmake >/dev/null 2>&1; then
+            CMAKE_VERSION="$(cmake --version | awk 'NR == 1 { print $3 }')"
+            if python3 -c \
+              'import sys; sys.exit(0 if tuple(map(int, sys.argv[1].split(".")[:2])) >= (3, 20) else 1)' \
+              "${CMAKE_VERSION}"; then
+              cmake --version
+              exit 0
+            fi
+            echo "CMake ${CMAKE_VERSION} is older than the required version 3.20; installing the pinned fallback."
+          fi
+
+          CMAKE_VENV="${RUNNER_TEMP}/espcontrol-cmake"
+          python3 -m venv "${CMAKE_VENV}"
+          "${CMAKE_VENV}/bin/python" -m pip install --disable-pip-version-check --no-cache-dir "cmake==3.31.10"
+          echo "${CMAKE_VENV}/bin" >> "${GITHUB_PATH}"
+          "${CMAKE_VENV}/bin/cmake" --version
+
       - name: Install dependencies
         run: |
           NPM_CACHE="${HOME}/.cache/espcontrol-actions/npm"
@@ -61,8 +95,59 @@ jobs:
           npm ci --prefer-offline --cache "${NPM_CACHE}"
           bash scripts/prune_actions_cache.sh "${NPM_CACHE}" "${ESPCONTROL_NPM_CACHE_MAX_MB}" --strategy reset
 
+      - name: Install browser runtime
+        run: npx playwright install --with-deps chromium
+
+      - name: Prepare release web assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          python3 scripts/prepare_release_web_assets.py "${RELEASE_TAG}"
+
+          LEGACY_WEB_DIR="${RUNNER_TEMP}/espcontrol-published-web"
+          LEGACY_WEB_MANIFEST="${LEGACY_WEB_DIR}/web-assets.json"
+          LEGACY_WEB_ARGS=()
+          mkdir -p "${LEGACY_WEB_DIR}"
+          if curl -fsSL "https://jtenniswood.github.io/espcontrol/webserver/web-assets.json" \
+            -o "${LEGACY_WEB_MANIFEST}"; then
+            BUNDLE_PATH=$(jq -er '[.bundles[] | select(any(.firmwareVersions[]?; . != "dev"))][0].path' \
+              "${LEGACY_WEB_MANIFEST}")
+            if [[ ! "${BUNDLE_PATH}" =~ ^bundles/[0-9a-f]{64}/www\.js$ ]]; then
+              echo "::error::Published web asset manifest has an invalid bundle path"
+              exit 1
+            fi
+            mkdir -p "docs/public/webserver/$(dirname "${BUNDLE_PATH}")"
+            curl -fsSL "https://jtenniswood.github.io/espcontrol/webserver/${BUNDLE_PATH}" \
+              -o "docs/public/webserver/${BUNDLE_PATH}"
+            LEGACY_WEB_ARGS=(--legacy-web-manifest "${LEGACY_WEB_MANIFEST}")
+          else
+            echo "::warning::Could not download the published web asset manifest; using the checked-in fallback bundle."
+          fi
+          python3 scripts/build.py www --retain-current-bundle "${LEGACY_WEB_ARGS[@]}"
+          python3 scripts/build.py www --check --retain-current-bundle "${LEGACY_WEB_ARGS[@]}"
+
+          BUNDLE_PATH=$(jq -r '.bundles[0].path // empty' docs/public/webserver/web-assets.json)
+          if [ -z "${BUNDLE_PATH}" ]; then
+            echo "::error::The generated web asset manifest does not declare a current bundle"
+            exit 1
+          fi
+          mkdir -p "dist/release-web-assets/$(dirname "${BUNDLE_PATH}")"
+          cp docs/public/webserver/web-assets.json dist/release-web-assets/web-assets.json
+          cp "docs/public/webserver/${BUNDLE_PATH}" "dist/release-web-assets/${BUNDLE_PATH}"
+
+      - name: Upload release web assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-web-assets
+          path: dist/release-web-assets/
+
       - name: Run release preflight
-        run: npm run check:release-preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          npm run check:release-preflight
+          python3 scripts/check_release_contract.py --github-repository "${GITHUB_REPOSITORY}"
 
   device-matrix:
     name: Prepare Device Matrix
@@ -116,6 +201,11 @@ jobs:
             find builds -maxdepth 1 -type f -print | sort || true
             exit 1
           fi
+          if [ "${{ matrix.recovery }}" = "true" ] &&
+             [ ! -f "builds/${{ matrix.slug }}.recovery.yaml" ]; then
+            echo "::error::Expected C6 recovery build file is missing: builds/${{ matrix.slug }}.recovery.yaml"
+            exit 1
+          fi
 
       - name: Load ESPHome version
         working-directory: espcontrol-${{ matrix.slug }}
@@ -141,10 +231,11 @@ jobs:
         run: |
           RUN_CACHE_ROOT="${RUNNER_TEMP}/espcontrol-esphome/${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.slug }}"
           PLATFORMIO_CACHE="${RUN_CACHE_ROOT}/platformio-${ESPHOME_VERSION}"
-          BUILD_CACHE="${RUN_CACHE_ROOT}/build"
+          NORMAL_BUILD_CACHE="${RUN_CACHE_ROOT}/build-normal"
+          RECOVERY_BUILD_CACHE="${RUN_CACHE_ROOT}/build-recovery"
           BUILD_INPUT_DIR=".firmware-builds"
           rm -rf "${RUN_CACHE_ROOT}"
-          mkdir -p "${PLATFORMIO_CACHE}" "${BUILD_CACHE}"
+          mkdir -p "${PLATFORMIO_CACHE}" "${NORMAL_BUILD_CACHE}" "${RECOVERY_BUILD_CACHE}"
           export PLATFORMIO_CACHE
           python3 - <<'PY'
           import json
@@ -172,8 +263,14 @@ jobs:
           cp builds/*.yaml "${BUILD_INPUT_DIR}/"
           echo "RUN_CACHE_ROOT=${RUN_CACHE_ROOT}" >> "$GITHUB_ENV"
           echo "PLATFORMIO_CACHE=${PLATFORMIO_CACHE}" >> "$GITHUB_ENV"
-          echo "BUILD_CACHE=${BUILD_CACHE}" >> "$GITHUB_ENV"
+          echo "NORMAL_BUILD_CACHE=${NORMAL_BUILD_CACHE}" >> "$GITHUB_ENV"
+          echo "RECOVERY_BUILD_CACHE=${RECOVERY_BUILD_CACHE}" >> "$GITHUB_ENV"
           echo "BUILD_INPUT_DIR=${BUILD_INPUT_DIR}" >> "$GITHUB_ENV"
+
+      - name: Prepare verified ESP32-C6 recovery firmware
+        if: matrix.recovery
+        working-directory: espcontrol-${{ matrix.slug }}
+        run: python3 scripts/prepare_c6_firmware.py
 
       - name: Pull ESPHome image
         working-directory: espcontrol-${{ matrix.slug }}
@@ -181,9 +278,17 @@ jobs:
           ESPHOME_IMAGE="ghcr.io/esphome/esphome:${ESPHOME_VERSION}"
           LOCK_FILE="/tmp/espcontrol-esphome-image.lock"
           if command -v flock >/dev/null 2>&1; then
-            flock "${LOCK_FILE}" ${DOCKER} pull "${ESPHOME_IMAGE}"
+            flock "${LOCK_FILE}" ${DOCKER} pull "${ESPHOME_IMAGE}" || {
+              echo "Initial ESPHome image pull failed; pruning stale Docker state and retrying."
+              ${DOCKER} system prune -af --volumes || true
+              flock "${LOCK_FILE}" ${DOCKER} pull "${ESPHOME_IMAGE}"
+            }
           else
-            ${DOCKER} pull "${ESPHOME_IMAGE}"
+            ${DOCKER} pull "${ESPHOME_IMAGE}" || {
+              echo "Initial ESPHome image pull failed; pruning stale Docker state and retrying."
+              ${DOCKER} system prune -af --volumes || true
+              ${DOCKER} pull "${ESPHOME_IMAGE}"
+            }
           fi
           echo "ESPHOME_IMAGE=${ESPHOME_IMAGE}" >> "$GITHUB_ENV"
 
@@ -193,28 +298,48 @@ jobs:
           VERSION: ${{ inputs.release_tag }}
         run: |
           SOURCE_DIR="${PWD}"
-          CONTAINER=$(${DOCKER} create \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/config \
-            -e PLATFORMIO_CORE_DIR=/config/.esphome/platformio \
-            -e PLATFORMIO_SETTING_ENABLE_TELEMETRY=false \
-            -v "${PLATFORMIO_CACHE}:/config/.esphome" \
-            -v "${BUILD_CACHE}:/config/${BUILD_INPUT_DIR}/.esphome" \
-            "${ESPHOME_IMAGE}" \
-            -s firmware_version "${VERSION}" \
-            compile /config/${BUILD_INPUT_DIR}/${{ matrix.slug }}.factory.yaml)
-          cleanup() {
-            ${DOCKER} rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+          compile_config() {
+            config_file="$1"
+            build_cache="$2"
+            container=$(${DOCKER} create \
+              --user "$(id -u):$(id -g)" \
+              -e HOME=/config \
+              -e PLATFORMIO_CORE_DIR=/config/.esphome/platformio \
+              -e PLATFORMIO_SETTING_ENABLE_TELEMETRY=false \
+              -v "${PLATFORMIO_CACHE}:/config/.esphome" \
+              -v "${build_cache}:/config/${BUILD_INPUT_DIR}/.esphome" \
+              "${ESPHOME_IMAGE}" \
+              -s firmware_version "${VERSION}" \
+              compile "/config/${BUILD_INPUT_DIR}/${config_file}")
+            cleanup_container() {
+              ${DOCKER} rm -f "${container}" >/dev/null 2>&1 || true
+            }
+            trap cleanup_container EXIT
+            if ! ${DOCKER} cp "${SOURCE_DIR}/." "${container}:/config"; then
+              cleanup_container
+              trap - EXIT
+              return 1
+            fi
+            set +e
+            ${DOCKER} start -a "${container}"
+            status=$?
+            set -e
+            ${DOCKER} cp \
+              "${container}:/config/${BUILD_INPUT_DIR}/.esphome/build" \
+              "${build_cache}/" 2>/dev/null || true
+            cleanup_container
+            trap - EXIT
+            return "${status}"
           }
-          trap cleanup EXIT
-          ${DOCKER} cp "${SOURCE_DIR}/." "${CONTAINER}:/config"
-          ${DOCKER} start -a "${CONTAINER}"
-          ${DOCKER} cp "${CONTAINER}:/config/${BUILD_INPUT_DIR}/.esphome/build" "${BUILD_CACHE}/" 2>/dev/null || true
+          compile_config "${{ matrix.slug }}.factory.yaml" "${NORMAL_BUILD_CACHE}"
+          if [ "${{ matrix.recovery }}" = "true" ]; then
+            compile_config "${{ matrix.slug }}.recovery.yaml" "${RECOVERY_BUILD_CACHE}"
+          fi
 
       - name: Collect firmware files and generate manifest
         id: firmware
         run: |
-          FIRMWARE_FACTORY=$(find "${BUILD_CACHE}/build" -name firmware.factory.bin -print -quit 2>/dev/null || true)
+          FIRMWARE_FACTORY=$(find "${NORMAL_BUILD_CACHE}/build" -name firmware.factory.bin -print -quit 2>/dev/null || true)
           mkdir -p dist/firmware
 
           if [ -z "${FIRMWARE_FACTORY}" ] || [ ! -f "${FIRMWARE_FACTORY}" ]; then
@@ -241,6 +366,28 @@ jobs:
             --factory "dist/firmware/${{ matrix.slug }}.factory.bin" \
             --ota "dist/firmware/${{ matrix.slug }}.ota.bin"
 
+          if [ "${{ matrix.recovery }}" = "true" ]; then
+            RECOVERY_FACTORY=$(find "${RECOVERY_BUILD_CACHE}/build" -name firmware.factory.bin -print -quit 2>/dev/null || true)
+            if [ -z "${RECOVERY_FACTORY}" ] || [ ! -f "${RECOVERY_FACTORY}" ]; then
+              echo "::error::C6 recovery compilation failed — factory binary not found"
+              exit 1
+            fi
+            cp "${RECOVERY_FACTORY}" "dist/firmware/${{ matrix.slug }}.recovery.bin"
+            python3 espcontrol-${{ matrix.slug }}/scripts/firmware_release.py recovery-manifest \
+              --slug "${{ matrix.slug }}" \
+              --version "${VERSION}" \
+              --recovery "dist/firmware/${{ matrix.slug }}.recovery.bin" \
+              --out "dist/firmware/${{ matrix.slug }}.recovery.manifest.json"
+            python3 espcontrol-${{ matrix.slug }}/scripts/firmware_release.py verify-recovery \
+              --slug "${{ matrix.slug }}" \
+              --version "${VERSION}" \
+              --manifest "dist/firmware/${{ matrix.slug }}.recovery.manifest.json" \
+              --recovery "dist/firmware/${{ matrix.slug }}.recovery.bin" \
+              --c6-firmware "espcontrol-${{ matrix.slug }}/.firmware-deps/esp32-c6/2.12.12/network_adapter_esp32c6.bin" \
+              --normal-factory "dist/firmware/${{ matrix.slug }}.factory.bin" \
+              --normal-ota "dist/firmware/${{ matrix.slug }}.ota.bin"
+          fi
+
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v7
         with:
@@ -251,7 +398,7 @@ jobs:
         if: always()
         working-directory: espcontrol-${{ matrix.slug }}
         run: |
-          if [ -z "${RUN_CACHE_ROOT:-}" ] || [ -z "${BUILD_CACHE:-}" ] || [ -z "${PLATFORMIO_CACHE:-}" ]; then
+          if [ -z "${RUN_CACHE_ROOT:-}" ] || [ -z "${NORMAL_BUILD_CACHE:-}" ] || [ -z "${PLATFORMIO_CACHE:-}" ]; then
             echo "No firmware cache paths were prepared."
             exit 0
           fi
@@ -280,20 +427,61 @@ jobs:
           merge-multiple: true
           path: dist/firmware
 
+      - name: Download release web assets
+        uses: actions/download-artifact@v8
+        with:
+          name: release-web-assets
+          path: release-web-assets
+
+      - name: Use release web assets
+        run: cp -a release-web-assets/. docs/public/webserver/
+
+      - name: Include release web assets in distribution
+        run: cp -a release-web-assets dist/release-web-assets
+
       - name: Generate release notes
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: python3 scripts/release_changelog.py "${RELEASE_TAG}" --output dist/release-notes.md
 
+      - name: Record release source provenance
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: |
+          mapfile -t DEVICE_SLUGS < <(python3 scripts/device_matrix.py release | jq -r '.include[].slug')
+          mapfile -t RECOVERY_SLUGS < <(python3 scripts/device_matrix.py release | jq -r '.include[] | select(.recovery) | .slug')
+          python3 scripts/firmware_release.py generate-release-manifest \
+            --version "${RELEASE_TAG}" \
+            --dir dist/firmware \
+            --slugs "${DEVICE_SLUGS[@]}" \
+            --recovery-slugs "${RECOVERY_SLUGS[@]}" \
+            --source-revision "${SOURCE_SHA}" \
+            --release-contract product/release_contract.json \
+            --web-manifest docs/public/webserver/web-assets.json \
+            --web-root docs/public/webserver
+
       - name: Verify complete distribution
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
         run: |
           mapfile -t DEVICE_SLUGS < <(python3 scripts/device_matrix.py release | jq -r '.include[].slug')
+          mapfile -t RECOVERY_SLUGS < <(python3 scripts/device_matrix.py release | jq -r '.include[] | select(.recovery) | .slug')
+          python3 scripts/firmware_release.py verify-release-manifest \
+            --version "${RELEASE_TAG}" \
+            --dir dist/firmware \
+            --slugs "${DEVICE_SLUGS[@]}" \
+            --recovery-slugs "${RECOVERY_SLUGS[@]}" \
+            --source-revision "${SOURCE_SHA}" \
+            --release-contract product/release_contract.json \
+            --web-manifest docs/public/webserver/web-assets.json \
+            --web-root docs/public/webserver
           python3 scripts/firmware_release.py verify-bundle \
             --version "${RELEASE_TAG}" \
             --dir dist/firmware \
-            --slugs "${DEVICE_SLUGS[@]}"
+            --slugs "${DEVICE_SLUGS[@]}" \
+            --recovery-slugs "${RECOVERY_SLUGS[@]}"
 
       - name: Upload verified release distribution
         uses: actions/upload-artifact@v7
@@ -321,15 +509,24 @@ jobs:
           name: release-dist
           path: dist
 
+      - name: Use release web assets
+        run: cp -a dist/release-web-assets/. docs/public/webserver/
+
       - name: Upload, verify, and publish draft release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           mapfile -t DEVICE_SLUGS < <(python3 scripts/device_matrix.py release | jq -r '.include[].slug')
+          mapfile -t RECOVERY_SLUGS < <(python3 scripts/device_matrix.py release | jq -r '.include[] | select(.recovery) | .slug')
           python3 scripts/firmware_release.py publish-draft \
             --version "${RELEASE_TAG}" \
             --dir dist/firmware \
             --slugs "${DEVICE_SLUGS[@]}" \
+            --recovery-slugs "${RECOVERY_SLUGS[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --notes dist/release-notes.md
+            --notes dist/release-notes.md \
+            --source-revision "${{ needs.preflight.outputs.source_sha }}" \
+            --release-contract product/release_contract.json \
+            --web-manifest docs/public/webserver/web-assets.json \
+            --web-root docs/public/webserver

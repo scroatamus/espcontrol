@@ -69,21 +69,28 @@ patch            v1.2.3 -> v1.2.4
 If there is no existing stable release, treat the first stable release as
 `v1.0.0` unless the user asks for a different full tag.
 
-### 3. Create the Tag and Draft Release
+### 3. Verify Release Source Readiness
 
-Choose the exact tag before creating it.
+No preparation PR is required. The `Build Release` workflow reads the published
+release catalogue, adds the selected tag to the compatibility list in its
+private checkout, rebuilds and verifies the web asset manifest, and carries the
+result through the release jobs. The Pages workflow performs the same
+catalogue-based preparation for ordinary public docs builds and deploys the
+verified release artifact when it follows a successful release workflow.
 
-Stable release:
+Set the selected tag before creating the draft, for example:
 
 ```bash
+# Stable release:
 TAG="vX.Y.Z"
+# Pre-release: TAG="vX.Y.Z-beta.N"
 ```
 
-Pre-release:
+Keep the source checkout clean and make sure generated outputs are current
+before creating the tag. The compatibility helper retains `dev`, the five
+current stable releases, and the latest pre-release only.
 
-```bash
-TAG="vX.Y.Z-beta.N"
-```
+### 4. Create the Tag and Draft Release
 
 Push that exact release tag so every workflow job can check out one immutable
 source revision. Then create a draft release for the existing tag. Do not
@@ -127,7 +134,7 @@ gh release view "$TAG" --json isDraft,tagName,url
 Do not close GitHub issues as part of this workflow unless the user explicitly
 asks; they prefer to test before issues are closed.
 
-### 4. Start and Watch the Release Action
+### 5. Start and Watch the Release Action
 
 Dispatch `Build Release` with the draft tag. Manual dispatch is the only
 supported release path because a draft release must remain private during the
@@ -151,7 +158,7 @@ gh run watch <run-id> --exit-status
 If the workflow fails, the release should remain a draft. Report the failed job
 and do not publish it manually.
 
-### 5. Verify Outputs
+### 6. Verify Outputs
 
 After `Build Release` succeeds, confirm the release is public and has the
 expected assets:
@@ -171,6 +178,9 @@ esp32-p4-86.ota.bin
 guition-esp32-p4-jc1060p470.factory.bin
 guition-esp32-p4-jc1060p470.manifest.json
 guition-esp32-p4-jc1060p470.ota.bin
+guition-esp32-p4-jc1060p470-v2.factory.bin
+guition-esp32-p4-jc1060p470-v2.manifest.json
+guition-esp32-p4-jc1060p470-v2.ota.bin
 guition-esp32-p4-jc4880p443.factory.bin
 guition-esp32-p4-jc4880p443.manifest.json
 guition-esp32-p4-jc4880p443.ota.bin

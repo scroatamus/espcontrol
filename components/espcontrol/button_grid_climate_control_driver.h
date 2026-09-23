@@ -1,5 +1,7 @@
 #pragma once
 
+#include "card_modal_target.h"
+
 // Shared lifecycle driver for Climate Control cards. The specialised
 // temperature, HVAC mode, preset, fan, swing, Home Assistant, and modal
 // helpers remain in button_grid_climate.h; this driver owns the grid/subpage
@@ -8,8 +10,7 @@
 namespace espcontrol::cards {
 
 inline bool climate_control_driver_matches(const Context &context) {
-  return !context.legacy_dispatch &&
-         context.runtime.driver == card_runtime::CardDriverId::CLIMATE;
+  return context.runtime.driver == card_runtime::CardDriverId::CLIMATE;
 }
 
 inline bool climate_control_driver_setup_visual(
@@ -28,8 +29,18 @@ inline bool climate_control_driver_attach_interaction(
 }
 
 inline bool climate_control_driver_refresh_layout(
-    BtnSlot &, const ParsedCfg &, const Context &context) {
-  return climate_control_driver_matches(context);
+    BtnSlot &slot, const ParsedCfg &config, const Context &context,
+    const DisplayProfile &display, int row_span, int col_span) {
+  if (!climate_control_driver_matches(context)) return false;
+  if (card_large_numbers_active_for_layout(config, row_span, col_span) &&
+      display_large_sensor_font(display)) {
+    apply_large_sensor_number_style(
+      slot, display_large_sensor_font(display),
+      display_large_sensor_unit_offset_percent(display));
+  } else {
+    apply_standard_sensor_number_style(slot, display);
+  }
+  return true;
 }
 
 inline bool climate_control_driver_cleanup(
@@ -150,6 +161,16 @@ inline bool climate_control_driver_handle_main_click(
     ? static_cast<ClimateControlCtx *>(lv_obj_get_user_data(button)) : nullptr;
   if (climate) climate_control_open_modal(climate);
   return true;
+}
+
+// Explicit modal-only route; it must never activate the card's command path.
+inline ModalTarget climate_control_driver_modal_target(
+    const Context &context, const ParsedCfg &config, lv_obj_t *button) {
+  if (!climate_control_driver_matches(context)) return {};
+  auto *runtime = button
+    ? static_cast<ClimateControlCtx *>(lv_obj_get_user_data(button)) : nullptr;
+  return modal_target(runtime, config.entity, ControlModalKind::CLIMATE,
+                      climate_control_can_open_modal(runtime), climate_control_open_modal);
 }
 
 }  // namespace espcontrol::cards

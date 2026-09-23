@@ -1,5 +1,7 @@
 #pragma once
 
+#include "card_modal_target.h"
+
 // Shared lifecycle driver for the Cover All Controls card. The specialised
 // position, tilt, presets, supported-feature, Home Assistant, and modal
 // helpers remain in button_grid_sliders.h; this driver owns the grid/subpage
@@ -8,8 +10,7 @@
 namespace espcontrol::cards {
 
 inline bool cover_modal_driver_matches(const Context &context) {
-  return !context.legacy_dispatch &&
-         context.runtime.driver == card_runtime::CardDriverId::COVER_MODAL;
+  return context.runtime.driver == card_runtime::CardDriverId::COVER_MODAL;
 }
 
 inline void cover_modal_driver_track_slider_cleanup(BtnSlot &slot) {
@@ -39,8 +40,14 @@ inline bool cover_modal_driver_attach_interaction(
 }
 
 inline bool cover_modal_driver_refresh_layout(
-    BtnSlot &, const ParsedCfg &, const Context &context) {
-  return cover_modal_driver_matches(context);
+    BtnSlot &slot, const ParsedCfg &, const Context &context) {
+  if (!cover_modal_driver_matches(context)) return false;
+  // apply_card_label_line_clamp re-anchors the label to the button's padding,
+  // which the slider zeroed, so the label would otherwise sit flush at the
+  // bottom while the icon stays inset. Re-apply the slider inset so both match
+  // other cards, mirroring the position/tilt path in access_cover_driver.
+  refresh_slider_card_layout(slot);
+  return true;
 }
 
 inline bool cover_modal_driver_cleanup(
@@ -142,6 +149,16 @@ inline bool cover_modal_driver_handle_main_click(
     ? static_cast<CoverControlCtx *>(lv_obj_get_user_data(button)) : nullptr;
   if (cover) cover_control_open_modal(cover);
   return true;
+}
+
+// Explicit modal-only route; it must never activate the card's command path.
+inline ModalTarget cover_modal_driver_modal_target(
+    const Context &context, const ParsedCfg &config, lv_obj_t *button) {
+  if (!cover_modal_driver_matches(context)) return {};
+  auto *runtime = button
+    ? static_cast<CoverControlCtx *>(lv_obj_get_user_data(button)) : nullptr;
+  return modal_target(runtime, config.entity, ControlModalKind::COVER_CONTROL,
+                      cover_control_can_open_modal(runtime), cover_control_open_modal);
 }
 
 }  // namespace espcontrol::cards
